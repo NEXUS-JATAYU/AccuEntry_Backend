@@ -2,8 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from schemas.chat import ChatRequest, ChatResponse
 from orchestration.onboarding_workflow import handle_chat
+from core.database import engine, Base
+import models.customer_info
 
-
+# Initialize DB tables
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
@@ -26,3 +29,4 @@ async def chat_endpoint(request : ChatRequest):
     except Exception as e:
         print(f"Error handling chat: {e}")
         raise e 
+    

@@ -1,5 +1,8 @@
 import json 
+import datetime
 from core.redis_client import redis_client
+from core.database import SessionLocal
+from models.customer_info import CustomerDetails
 from validators.data_capture_validator import (
     validate_name,
     validate_pan,
@@ -57,11 +60,11 @@ STEP_CONFIG = {
         "question": "What is your occupation?",
         "field_type": "text"
     },
-    "digilocker_choice": {
-        "question": "Would you like to fetch documents via DigiLocker?",
-        "field_type": "select",
-        "options": ["yes", "no"]
-    },
+    # "digilocker_choice": {
+    #     "question": "Would you like to fetch documents via DigiLocker?",
+    #     "field_type": "select",
+    #     "options": ["yes", "no"]
+    # },
     "confirmation": {
         "question": "Please confirm all details are correct.",
         "field_type": "select",
@@ -136,20 +139,43 @@ async def run(session_id: str, user_input: str):
     data[step_key] = user_input
 
     # Special DigiLocker branch
-    if step_key == "digilocker_choice" and user_input.lower() == "yes":
-        return {
-            "message": "Redirecting to DigiLocker for authentication.",
-            "action": "digilocker_auth",
-            "progress": calculate_progress(step_index),
-            "completed": False
-        }
+    # if step_key == "digilocker_choice" and user_input.lower() == "yes":
+    #     return {
+    #         "message": "Redirecting to DigiLocker for authentication.",
+    #         "action": "digilocker_auth",
+    #         "progress": calculate_progress(step_index),
+    #         "completed": False
+    #     }
 
     # Move to next step
     step_index += 1
 
     # If onboarding complete
     if step_index >= len(steps):
-        # TODO: Save to Postgres here
+        # Save to Postgres here
+        try:
+            db = SessionLocal()
+            customer = CustomerDetails(
+                c_name=data.get("full_name"),
+                c_account_type=data.get("account_type"),
+                c_phone_number=data.get("phone"),
+                c_email=data.get("email"),
+                c_address=data.get("address"),
+                c_occupation=data.get("occupation"),
+                c_pan=data.get("pan"),
+                c_dob=datetime.datetime.strptime(data.get("dob"), "%Y-%m-%d").date() if data.get("dob") else None
+            )
+            db.add(customer)
+            db.commit()
+            db.refresh(customer)
+        except Exception as e:
+            print(f"Error saving customer: {e}")
+            if 'db' in locals():
+                db.rollback()
+        finally:
+            if 'db' in locals():
+                db.close()
+
         await redis_client.delete(get_key(session_id))
         return {
             "message": "Onboarding data capture complete.",
