@@ -48,6 +48,22 @@ FIELD_QUESTIONS = {
     "confirmation": "Confirm details? (yes/no):"
 }
 
+MAIN_STEPS = {
+    "Detail Capture": [
+        "account_type","full_name","dob","pan","phone","email","address","occupation","confirmation"
+    ],
+    "Identity Verification": [
+        "kyc_verification", "ocr_recognition", "live_kyc"
+    ]
+}
+
+def current_main_step(extracted_data, missing_fields):
+    for main, subs in MAIN_STEPS.items():
+        for field in subs:
+            if field in missing_fields:
+                return main
+    return "Completed"
+
 # -----------------------------------------
 # Schema
 # -----------------------------------------
@@ -323,8 +339,10 @@ async def run(session_id: str, user_input: str):
             db.close()
 
     return {
-        "message": ai_msg,
-        "progress": progress,
-        "completed": False,
-        "missing_fields": missing
+      "message": ai_msg,
+      "progress": progress,
+      "completed": new_state.get("onboarding_complete", False),
+      "missing_fields": missing,
+      "main_steps": MAIN_STEPS,
+      "current_main_step": current_main_step(data, missing)
     }

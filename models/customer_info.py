@@ -8,7 +8,7 @@ class CustomerDetails(Base):
     c_name = Column(String, nullable=False)
     c_account_type = Column(String, nullable=False)
     c_phone_number = Column(String, unique=True, index=True, nullable=False)
-    c_email = Column(String, unique=True, index=True, nullable=False)
+    c_email = Column(String, index=True, nullable=False)
     c_address = Column(String, nullable=False)
     c_occupation = Column(String, nullable=False)
     c_pan = Column(String, unique=True, index=True, nullable=False)
