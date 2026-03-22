@@ -48,21 +48,28 @@ FIELD_QUESTIONS = {
     "confirmation": "Confirm details? (yes/no):"
 }
 
-MAIN_STEPS = {
-    "Detail Capture": [
+ONBOARDING_STEPS = [
+    {"step": 1, "name": "Detail Capture", "fields": [
         "account_type","full_name","dob","pan","phone","email","address","occupation","confirmation"
-    ],
-    "Identity Verification": [
-        "kyc_verification", "ocr_recognition", "live_kyc"
-    ]
-}
+    ]},
+    {"step": 2, "name": "Identity Verification", "fields": []},
+    {"step": 3, "name": "AML Screening", "fields": []},
+    {"step": 4, "name": "Fraud Check", "fields": []},
+]
 
-def current_main_step(extracted_data, missing_fields):
-    for main, subs in MAIN_STEPS.items():
-        for field in subs:
-            if field in missing_fields:
-                return main
-    return "Completed"
+def get_current_step(extracted_data, onboarding_complete):
+    """Return (step_number, step_name) based on progress."""
+    if not onboarding_complete:
+        # Still in detail capture
+        return 1, "Detail Capture"
+    # After detail capture we move to step 2
+    return 2, "Identity Verification"
+
+def get_step_number(step_name):
+    for s in ONBOARDING_STEPS:
+        if s["name"] == step_name:
+            return s["step"]
+    return 1
 
 # -----------------------------------------
 # Schema
@@ -150,17 +157,14 @@ async def save_session(session_id, state: AgentState):
 # Nodes
 # -----------------------------------------
 def input_node(state: AgentState):
-    if not state["messages"]:
-        return {}
-
-    user_input = state["messages"][-1].content.strip()
+    user_input = state["messages"][-1].content.strip() if state["messages"] else ""
     current_field = state.get("current_missing_field")
 
-    # First step
+    # FIRST STEP INIT (IMPORTANT)
     if not current_field:
         return {
             "current_missing_field": FIELD_ORDER[0],
-            "temp_input": user_input  
+            "temp_input": user_input if user_input != "start" else None
         }
 
     return {"temp_input": user_input}
@@ -277,7 +281,7 @@ async def run(session_id: str, user_input: str):
     data = new_state["extracted_data"]
 
     progress = calculate_progress(data)
-    missing = [f for f in REQUIRED_FIELDS if not data.get(f)]
+    missing = [f for f in FIELD_ORDER if not data.get(f)]
 
     #Save to DB
     if new_state.get("onboarding_complete"):
@@ -297,7 +301,9 @@ async def run(session_id: str, user_input: str):
             return {
                 "message": "Incomplete data",
                 "progress": progress,
-                "completed": False
+                "completed": False,
+                "step": 1,
+                "current_main_step": "Detail Capture"
             }
 
         db = SessionLocal()
@@ -320,9 +326,11 @@ async def run(session_id: str, user_input: str):
             await redis_client.delete(get_key(session_id))
 
             return {
-                "message": "Onboarding complete! Your data has been saved successfully. We will now proceed to verification.",
+                "message": "Onboarding complete! Your data has been saved successfully. We will now proceed to Identity Verification. Please upload your PAN card document(JPEG/PNG/JPG).",
                 "progress": 100,
                 "completed": True,
+                "step": 2,
+                "current_main_step": "Identity Verification"
             }
 
         except Exception as e:
@@ -332,17 +340,20 @@ async def run(session_id: str, user_input: str):
             return {
                 "message": f"Database error: {e}",
                 "progress": progress,
-                "completed": False
+                "completed": False,
+                "step": 1,
+                "current_main_step": "Detail Capture"
             }
 
         finally:
             db.close()
 
+    step_num, step_name = get_current_step(data, new_state.get("onboarding_complete", False))
     return {
-      "message": ai_msg,
-      "progress": progress,
-      "completed": new_state.get("onboarding_complete", False),
-      "missing_fields": missing,
-      "main_steps": MAIN_STEPS,
-      "current_main_step": current_main_step(data, missing)
+        "message": ai_msg,
+        "progress": progress,
+        "completed": new_state.get("onboarding_complete", False),
+        "step": step_num,
+        "current_main_step": step_name
     }
+    
