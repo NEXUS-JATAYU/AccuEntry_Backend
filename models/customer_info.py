@@ -6,7 +6,7 @@ class CustomerDetails(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     c_name = Column(String, nullable=False)
-    c_account_type = Column(String, unique=True, index=True, nullable=False)
+    c_account_type = Column(String, nullable=False)
     c_phone_number = Column(String, unique=True, index=True, nullable=False)
     c_email = Column(String, unique=True, index=True, nullable=False)
     c_address = Column(String, nullable=False)

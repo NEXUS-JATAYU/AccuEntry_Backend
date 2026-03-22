@@ -7,6 +7,7 @@ __pycache__/
 venv/
 env/
 .venv/
+myenv/
 
 # Environment variables
 .env
@@ -32,3 +33,5 @@ Thumbs.db
 
 # Migrations (if using Alembic later)
 alembic/versions/*.pyc
+
+/uploads
