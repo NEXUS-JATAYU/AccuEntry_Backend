@@ -48,6 +48,29 @@ FIELD_QUESTIONS = {
     "confirmation": "Confirm details? (yes/no):"
 }
 
+ONBOARDING_STEPS = [
+    {"step": 1, "name": "Detail Capture", "fields": [
+        "account_type","full_name","dob","pan","phone","email","address","occupation","confirmation"
+    ]},
+    {"step": 2, "name": "Identity Verification", "fields": []},
+    {"step": 3, "name": "AML Screening", "fields": []},
+    {"step": 4, "name": "Fraud Check", "fields": []},
+]
+
+def get_current_step(extracted_data, onboarding_complete):
+    """Return (step_number, step_name) based on progress."""
+    if not onboarding_complete:
+        # Still in detail capture
+        return 1, "Detail Capture"
+    # After detail capture we move to step 2
+    return 2, "Identity Verification"
+
+def get_step_number(step_name):
+    for s in ONBOARDING_STEPS:
+        if s["name"] == step_name:
+            return s["step"]
+    return 1
+
 # -----------------------------------------
 # Schema
 # -----------------------------------------
@@ -62,7 +85,7 @@ class OnboardingData(BaseModel):
     occupation: Optional[str] = None
     confirmation: Optional[Literal["yes", "no"]] = None
 
-REQUIRED_FIELDS = FIELD_ORDER
+REQUIRED_FIELDS = list(OnboardingData.model_fields.keys())
 
 # -----------------------------------------
 # State - IMPORTANT: MUST be TypedDict for LangGraph to reduce properly
@@ -84,10 +107,8 @@ llm = ChatOllama(model="gemma2:2b", temperature=0)
 # Helpers
 # -----------------------------------------
 def calculate_progress(data):
-    # Exclude 'confirmation' from progress — it's not a data field, it's a control step
-    data_fields = [f for f in FIELD_ORDER if f != "confirmation"]
-    filled = sum(1 for k in data_fields if data.get(k))
-    return int((filled / len(data_fields)) * 100)
+    filled = sum(1 for k in REQUIRED_FIELDS if data.get(k))
+    return int((filled / len(REQUIRED_FIELDS)) * 100)
 
 def get_key(session_id):
     return f"onboarding_lg:{session_id}"
@@ -136,17 +157,14 @@ async def save_session(session_id, state: AgentState):
 # Nodes
 # -----------------------------------------
 def input_node(state: AgentState):
-    if not state["messages"]:
-        return {}
-
-    user_input = state["messages"][-1].content.strip()
+    user_input = state["messages"][-1].content.strip() if state["messages"] else ""
     current_field = state.get("current_missing_field")
 
-    # First step
+    # FIRST STEP INIT (IMPORTANT)
     if not current_field:
         return {
             "current_missing_field": FIELD_ORDER[0],
-            "temp_input": user_input  
+            "temp_input": user_input if user_input != "start" else None
         }
 
     return {"temp_input": user_input}
@@ -206,12 +224,11 @@ def response_node(state: AgentState):
     field = state.get("current_missing_field")
     error = state.get("validation_error")
 
-    # ❌ If error → repeat SAME field
     if error:
         msg = error
         return {"messages": [AIMessage(content=msg)]}
 
-    # ✅ If confirmation step completed
+   
     if field == "confirmation" and data.get("confirmation") == "yes":
         msg = "Onboarding complete"
         return {"current_missing_field": None, "onboarding_complete": True, "messages": [AIMessage(content=msg)]}
@@ -257,11 +274,6 @@ async def run(session_id: str, user_input: str):
     # Convert initial empty string requests from frontend (when widget opens) to help message
     if user_input.strip():
         state["messages"].append(HumanMessage(content=user_input))
-    
-    # If the user input is empty, and it is a new session, we manually trigger the first question 
-    # so we don't return an empty ai message. The frontend ChatWindow.jsx sends the "I want to open..." automatically.
-    
-    # Use asynchronous non-blocking invoke to prevent FastAPI event loop from freezing
     new_state = await app.ainvoke(state)
     await save_session(session_id, new_state)
 
@@ -269,9 +281,9 @@ async def run(session_id: str, user_input: str):
     data = new_state["extracted_data"]
 
     progress = calculate_progress(data)
-    missing = [f for f in REQUIRED_FIELDS if not data.get(f)]
+    missing = [f for f in FIELD_ORDER if not data.get(f)]
 
-    # ✅ If onboarding COMPLETE → Save to DB
+    #Save to DB
     if new_state.get("onboarding_complete"):
         required_check = all([
             data.get("account_type"),
@@ -287,9 +299,11 @@ async def run(session_id: str, user_input: str):
 
         if not required_check:
             return {
-                "message": "Some details are missing. Please try again.",
+                "message": "Incomplete data",
                 "progress": progress,
-                "completed": False
+                "completed": False,
+                "step": 1,
+                "current_main_step": "Detail Capture"
             }
 
         db = SessionLocal()
@@ -312,36 +326,34 @@ async def run(session_id: str, user_input: str):
             await redis_client.delete(get_key(session_id))
 
             return {
-                "message": "Onboarding complete! Your data has been saved successfully. We will now proceed to verification.",
+                "message": "Onboarding complete! Your data has been saved successfully. We will now proceed to Identity Verification. Please upload your PAN card document(JPEG/PNG/JPG).",
                 "progress": 100,
                 "completed": True,
+                "step": 2,
+                "current_main_step": "Identity Verification"
             }
 
         except Exception as e:
-            print("❌ DB Error:", e)
+            print("DB Error:", e)
             db.rollback()
 
-            # Friendly error messages for common issues
-            error_str = str(e).lower()
-            if "unique" in error_str or "duplicate" in error_str:
-                friendly_msg = "It looks like an account with some of these details already exists. Please check your PAN, email, or phone number."
-            elif "connection" in error_str:
-                friendly_msg = "We're having trouble connecting to our servers. Please try again in a moment."
-            else:
-                friendly_msg = "Something went wrong while saving your details. Please try again."
-
             return {
-                "message": friendly_msg,
+                "message": f"Database error: {e}",
                 "progress": progress,
-                "completed": False
+                "completed": False,
+                "step": 1,
+                "current_main_step": "Detail Capture"
             }
 
         finally:
             db.close()
 
+    step_num, step_name = get_current_step(data, new_state.get("onboarding_complete", False))
     return {
         "message": ai_msg,
         "progress": progress,
-        "completed": False,
-        "missing_fields": missing
+        "completed": new_state.get("onboarding_complete", False),
+        "step": step_num,
+        "current_main_step": step_name
     }
+    

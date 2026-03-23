@@ -1,359 +1,263 @@
-import json
-import datetime
-import re
-from pydantic import BaseModel, Field
-from typing import Optional, Literal, Dict, Any, List, Annotated
-from typing_extensions import TypedDict
-import operator
+"""
+Data capture LangGraph subgraph: collects five onboarding fields into OnboardingState.
 
+Flow per invoke: entry_node → capture_node (LLM) → validate_node → END.
+"""
+
+from __future__ import annotations
+import os
+from typing import Any, Optional
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
-from langgraph.graph import StateGraph, START, END
-
-from core.redis_client import redis_client
-from core.database import SessionLocal
-from models.customer_info import CustomerDetails
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from data_capture.data_capture_validator import (
+    validate_date,
     validate_name,
     validate_pan,
-    validate_phone,
-    validate_email,
-    validate_date,
 )
+from state import OnboardingState
 
-SESSION_TTL = 3600
-
-FIELD_ORDER = [
-    "account_type",
+FIELD_ORDER: tuple[str, ...] = (
     "full_name",
     "dob",
-    "pan",
-    "phone",
-    "email",
+    "pan_number",
     "address",
-    "occupation",
-    "confirmation"
-]
+    "account_type",
+)
 
-FIELD_QUESTIONS = {
-    "account_type": "Enter account type (Savings/Current):",
+FIELD_QUESTIONS: dict[str, str] = {
     "full_name": "Enter full name:",
     "dob": "Enter DOB (YYYY-MM-DD):",
-    "pan": "Enter PAN:",
-    "phone": "Enter phone number:",
-    "email": "Enter email:",
+    "pan_number": "Enter PAN:",
     "address": "Enter address:",
-    "occupation": "Enter occupation:",
-    "confirmation": "Confirm details? (yes/no):"
+    "account_type": "Enter account type (Savings/Current):",
 }
 
-ONBOARDING_STEPS = [
-    {"step": 1, "name": "Detail Capture", "fields": [
-        "account_type","full_name","dob","pan","phone","email","address","occupation","confirmation"
-    ]},
-    {"step": 2, "name": "Identity Verification", "fields": []},
-    {"step": 3, "name": "AML Screening", "fields": []},
-    {"step": 4, "name": "Fraud Check", "fields": []},
-]
 
-def get_current_step(extracted_data, onboarding_complete):
-    """Return (step_number, step_name) based on progress."""
-    if not onboarding_complete:
-        # Still in detail capture
-        return 1, "Detail Capture"
-    # After detail capture we move to step 2
-    return 2, "Identity Verification"
+def _is_set(value: Optional[str]) -> bool:
+    return value is not None and bool(str(value).strip())
 
-def get_step_number(step_name):
-    for s in ONBOARDING_STEPS:
-        if s["name"] == step_name:
-            return s["step"]
-    return 1
 
-# -----------------------------------------
-# Schema
-# -----------------------------------------
-class OnboardingData(BaseModel):
-    account_type: Optional[Literal["Savings", "Current"]] = None
-    full_name: Optional[str] = None
-    dob: Optional[str] = None
-    pan: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    address: Optional[str] = None
-    occupation: Optional[str] = None
-    confirmation: Optional[Literal["yes", "no"]] = None
+def _first_missing(state: OnboardingState) -> Optional[str]:
+    for key in FIELD_ORDER:
+        if not _is_set(state.get(key)):  # type: ignore[arg-type]
+            return key
+    return None
 
-REQUIRED_FIELDS = list(OnboardingData.model_fields.keys())
 
-# -----------------------------------------
-# State - IMPORTANT: MUST be TypedDict for LangGraph to reduce properly
-# -----------------------------------------
-class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], operator.add]
-    extracted_data: dict
-    current_missing_field: Optional[str]
-    validation_error: Optional[str]
-    onboarding_complete: Optional[bool]
-    temp_input: Optional[str]
+def _last_user_text(state: OnboardingState) -> str:
+    for m in reversed(state.get("messages", [])):
+        if m.get("role") == "user":
+            return (m.get("text") or "").strip()
+    return ""
 
-# -----------------------------------------
-# LLM
-# -----------------------------------------
-llm = ChatOllama(model="gemma2:2b", temperature=0)
 
-# -----------------------------------------
-# Helpers
-# -----------------------------------------
-def calculate_progress(data):
-    filled = sum(1 for k in REQUIRED_FIELDS if data.get(k))
-    return int((filled / len(REQUIRED_FIELDS)) * 100)
+def _llm() -> ChatOllama:
+    model = os.getenv("OLLAMA_MODEL", "gemma2:2b")
+    return ChatOllama(model=model, temperature=0)
 
-def get_key(session_id):
-    return f"onboarding_lg:{session_id}"
 
-# -----------------------------------------
-# Redis Session
-# -----------------------------------------
-async def get_session(session_id) -> AgentState:
-    data = await redis_client.get(get_key(session_id))
-    if data:
-        parsed = json.loads(data)
+_llm_singleton: Optional[ChatOllama] = None
+
+
+def _get_llm() -> ChatOllama:
+    global _llm_singleton
+    if _llm_singleton is None:
+        _llm_singleton = _llm()
+    return _llm_singleton
+
+
+def entry_node(state: OnboardingState) -> dict[str, Any]:
+    target = _first_missing(state)
+    out: dict[str, Any] = {"capture_target": target, "capture_error": None}
+
+    if target is None:
+        return out
+
+    msgs = state.get("messages", [])
+    last_is_user = bool(msgs) and msgs[-1].get("role") == "user"
+    if not last_is_user:
+        out["messages"] = [{"role": "assistant", "text": FIELD_QUESTIONS[target]}]
+    return out
+
+
+async def capture_node(state: OnboardingState) -> dict[str, Any]:
+    target = state.get("capture_target")
+    if not target:
+        return {"capture_candidate": None}
+
+    user_text = _last_user_text(state)
+    if not user_text:
+        return {"capture_candidate": None}
+
+    llm = _get_llm()
+    system = SystemMessage(
+        content=(
+            f"You extract a single field for a bank onboarding form. "
+            f'Field name: "{target}". '
+            "Reply with only the extracted value, no quotes or explanation. "
+            'If the field is account_type, reply with exactly "Savings" or "Current" '
+            "when possible; otherwise reply with the user\u2019s wording. "
+            "If nothing relevant is present, reply with an empty string."
+        )
+    )
+    human = HumanMessage(content=user_text)
+    resp = await llm.ainvoke([system, human])
+    raw = (getattr(resp, "content", None) or "").strip()
+    return {"capture_candidate": raw if raw else None}
+
+
+def validate_node(state: OnboardingState) -> dict[str, Any]:
+    target = state.get("capture_target")
+    candidate = state.get("capture_candidate")
+
+    if target is None:
+        if _first_missing(state) is None and state.get("stage") == "data_capture":
+            return {
+                "stage": "doc_verification",
+                "progress": 25,
+                "capture_candidate": None,
+                "capture_error": None,
+                "capture_target": None,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "text": (
+                            "Your details are saved. Next, we\u2019ll verify your "
+                            "documents (PAN, Aadhaar, and selfie)."
+                        ),
+                    }
+                ],
+            }
+        return {}
+
+    if candidate is None:
+        if not _last_user_text(state):
+            return {}
         return {
+            "capture_error": "empty",
+            "capture_candidate": None,
             "messages": [
-                HumanMessage(content=m["content"]) if m["type"] == "user" else AIMessage(content=m["content"])
-                for m in parsed["messages"]
+                {
+                    "role": "assistant",
+                    "text": (
+                        "I couldn\u2019t read a value for that. "
+                        f"Please try again: {FIELD_QUESTIONS[target]}"
+                    ),
+                }
             ],
-            "extracted_data": parsed["extracted_data"],
-            "current_missing_field": parsed.get("current_missing_field"),
-            "validation_error": parsed.get("validation_error"),
-            "onboarding_complete": False,
-            "temp_input": None
         }
 
-    return {
-        "messages": [],
-        "extracted_data": {},
-        "current_missing_field": None,
-        "validation_error": None,
-        "onboarding_complete": False,
-        "temp_input": None
-    }
+    key = target
+    value = candidate
 
-async def save_session(session_id, state: AgentState):
-    payload = {
-        "messages": [
-            {"type": "user" if isinstance(m, HumanMessage) else "ai", "content": m.content}
-            for m in state["messages"]
-        ],
-        "extracted_data": state["extracted_data"],
-        "current_missing_field": state.get("current_missing_field"),
-        "validation_error": state.get("validation_error"),
-    }
-    await redis_client.set(get_key(session_id), json.dumps(payload), ex=SESSION_TTL)
-
-# -----------------------------------------
-# Nodes
-# -----------------------------------------
-def input_node(state: AgentState):
-    user_input = state["messages"][-1].content.strip() if state["messages"] else ""
-    current_field = state.get("current_missing_field")
-
-    # FIRST STEP INIT (IMPORTANT)
-    if not current_field:
-        return {
-            "current_missing_field": FIELD_ORDER[0],
-            "temp_input": user_input if user_input != "start" else None
-        }
-
-    return {"temp_input": user_input}
-
-def validation_node(state: AgentState):
-    data = dict(state.get("extracted_data", {}))
-    field = state.get("current_missing_field")
-    value = state.get("temp_input")
-
-    if not field or value is None:
-        return {"validation_error": None}
-
-    # Intelligent Extraction for Account Type
-    if field == "account_type":
+    if key == "account_type":
         val = value.lower()
         if "saving" in val:
-            data[field] = "Savings"
-            return {"extracted_data": data, "validation_error": None, "temp_input": None}
+            normalized = "Savings"
         elif "current" in val or "checking" in val:
-            data[field] = "Current"
-            return {"extracted_data": data, "validation_error": None, "temp_input": None}
+            normalized = "Current"
         else:
-            return {"validation_error": "Please choose Savings or Current account."}
-
-    # Confirmation
-    elif field == "confirmation":
-        if "yes" in value.lower():
-            data[field] = "yes"
-            return {"extracted_data": data, "validation_error": None, "temp_input": None}
-        elif "no" in value.lower():
-            return {"validation_error": "You said no. Please confirm with 'yes' when you are happy with the details, or we can restart the process."}
-        else:
-            return {"validation_error": "Please enter 'yes' to confirm or 'no'."}
-
-    # Validators
-    else:
-        validators = {
-            "full_name": validate_name,
-            "pan": validate_pan,
-            "phone": validate_phone,
-            "email": validate_email,
-            "dob": validate_date,
-        }
-
-        if field in validators:
-            is_valid, result = validators[field](value)
-            if not is_valid:
-                return {"validation_error": result}
-            data[field] = result
-        else:
-            data[field] = value
-
-    return {"extracted_data": data, "validation_error": None, "temp_input": None}
-
-def response_node(state: AgentState):
-    data = state["extracted_data"]
-    field = state.get("current_missing_field")
-    error = state.get("validation_error")
-
-    if error:
-        msg = error
-        return {"messages": [AIMessage(content=msg)]}
-
-   
-    if field == "confirmation" and data.get("confirmation") == "yes":
-        msg = "Onboarding complete"
-        return {"current_missing_field": None, "onboarding_complete": True, "messages": [AIMessage(content=msg)]}
-
-    # Move to next field
-    current_index = FIELD_ORDER.index(field)
-    if current_index + 1 < len(FIELD_ORDER):
-        next_field = FIELD_ORDER[current_index + 1]
-        msg = FIELD_QUESTIONS[next_field]
-        
-        # Override the msg if the next field is confirmation
-        if next_field == "confirmation":
-            details = "\n".join([f"• {k.replace('_', ' ').capitalize()}: {v}" for k, v in data.items() if k != "confirmation"])
-            msg = f"Please confirm your details are correct:\n\n{details}\n\nType 'yes' to confirm and save."
-
-        return {"current_missing_field": next_field, "messages": [AIMessage(content=msg)]}
-    else:
-        msg = "Onboarding complete"
-        return {"current_missing_field": None, "onboarding_complete": True, "messages": [AIMessage(content=msg)]}
-
-
-# -----------------------------------------
-# Graph
-# -----------------------------------------
-workflow = StateGraph(AgentState)
-workflow.add_node("input", input_node)
-workflow.add_node("validate", validation_node)
-workflow.add_node("response", response_node)
-
-workflow.add_edge(START, "input")
-workflow.add_edge("input", "validate")
-workflow.add_edge("validate", "response")
-workflow.add_edge("response", END)
-
-app = workflow.compile()
-
-# -----------------------------------------
-# Main Run
-# -----------------------------------------
-async def run(session_id: str, user_input: str):
-    state = await get_session(session_id)
-
-    # Convert initial empty string requests from frontend (when widget opens) to help message
-    if user_input.strip():
-        state["messages"].append(HumanMessage(content=user_input))
-    new_state = await app.ainvoke(state)
-    await save_session(session_id, new_state)
-
-    ai_msg = new_state["messages"][-1].content
-    data = new_state["extracted_data"]
-
-    progress = calculate_progress(data)
-    missing = [f for f in FIELD_ORDER if not data.get(f)]
-
-    #Save to DB
-    if new_state.get("onboarding_complete"):
-        required_check = all([
-            data.get("account_type"),
-            data.get("full_name"),
-            data.get("dob"),
-            data.get("pan"),
-            data.get("phone"),
-            data.get("email"),
-            data.get("address"),
-            data.get("occupation"),
-            data.get("confirmation") == "yes"
-        ])
-
-        if not required_check:
             return {
-                "message": "Incomplete data",
-                "progress": progress,
-                "completed": False,
-                "step": 1,
-                "current_main_step": "Detail Capture"
+                "capture_error": "account_type",
+                "capture_candidate": None,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "text": "Please choose Savings or Current account.",
+                    },
+                ],
             }
+        return _apply_success(state, key, normalized)
 
-        db = SessionLocal()
+    if key == "full_name":
+        ok, result = validate_name(value)
+        if not ok:
+            return _validation_fail(result)
+        return _apply_success(state, key, result)
 
-        try:
-            customer = CustomerDetails(
-                c_name=data["full_name"],
-                c_account_type=data["account_type"],
-                c_phone_number=data["phone"],
-                c_email=data["email"],
-                c_address=data["address"],
-                c_occupation=data["occupation"],
-                c_pan=data["pan"],
-                c_dob=datetime.datetime.strptime(data["dob"], "%Y-%m-%d").date()
-            )
+    if key == "dob":
+        ok, result = validate_date(value)
+        if not ok:
+            return _validation_fail(result)
+        return _apply_success(state, key, result)
 
-            db.add(customer)
-            db.commit()
+    if key == "pan_number":
+        ok, result = validate_pan(value)
+        if not ok:
+            return _validation_fail(result)
+        return _apply_success(state, key, result)
 
-            await redis_client.delete(get_key(session_id))
+    if key == "address":
+        cleaned = value.strip()
+        return _apply_success(state, key, cleaned)
 
-            return {
-                "message": "Onboarding complete! Your data has been saved successfully. We will now proceed to Identity Verification. Please upload your PAN card document(JPEG/PNG/JPG).",
-                "progress": 100,
-                "completed": True,
-                "step": 2,
-                "current_main_step": "Identity Verification"
-            }
+    return {}
 
-        except Exception as e:
-            print("DB Error:", e)
-            db.rollback()
 
-            return {
-                "message": f"Database error: {e}",
-                "progress": progress,
-                "completed": False,
-                "step": 1,
-                "current_main_step": "Detail Capture"
-            }
-
-        finally:
-            db.close()
-
-    step_num, step_name = get_current_step(data, new_state.get("onboarding_complete", False))
+def _validation_fail(message: str) -> dict[str, Any]:
     return {
-        "message": ai_msg,
-        "progress": progress,
-        "completed": new_state.get("onboarding_complete", False),
-        "step": step_num,
-        "current_main_step": step_name
+        "capture_error": "validation",
+        "capture_candidate": None,
+        "messages": [{"role": "assistant", "text": message}],
     }
-    
+
+
+def _apply_success(
+    state: OnboardingState,
+    field_key: str,
+    normalized: str,
+) -> dict[str, Any]:
+    vals: dict[str, Optional[str]] = {k: state.get(k) for k in FIELD_ORDER}  # type: ignore[misc]
+    vals[field_key] = normalized
+
+    next_missing: Optional[str] = None
+    for k in FIELD_ORDER:
+        if not _is_set(vals.get(k)):
+            next_missing = k
+            break
+
+    filled_count = sum(1 for k in FIELD_ORDER if _is_set(vals.get(k)))
+    progress = 25 if next_missing is None else min(24, filled_count * 5)
+
+    merged: dict[str, Any] = {
+        field_key: normalized,
+        "capture_candidate": None,
+        "capture_error": None,
+        "capture_target": None,
+        "progress": progress,
+    }
+
+    if next_missing is None:
+        merged["stage"] = "doc_verification"
+        merged["progress"] = 25
+        merged["messages"] = [
+            {
+                "role": "assistant",
+                "text": (
+                    "Your details are saved. Next, we\u2019ll verify your "
+                    "documents (PAN, Aadhaar, and selfie)."
+                ),
+            }
+        ]
+        return merged
+
+    merged["messages"] = [{"role": "assistant", "text": FIELD_QUESTIONS[next_missing]}]
+    return merged
+
+
+def build_data_capture_graph() -> CompiledStateGraph:
+    workflow = StateGraph(OnboardingState)
+    workflow.add_node("entry_node", entry_node)
+    workflow.add_node("capture_node", capture_node)
+    workflow.add_node("validate_node", validate_node)
+    workflow.add_edge(START, "entry_node")
+    workflow.add_edge("entry_node", "capture_node")
+    workflow.add_edge("capture_node", "validate_node")
+    workflow.add_edge("validate_node", END)
+    return workflow.compile()
+
+
+data_capture_graph = build_data_capture_graph()
