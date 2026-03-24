@@ -48,6 +48,10 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "aml_in_background": False,
         "aml_completed": False,
         "fraud_status": None,
+        "fraud_risk_score": None,
+        "fraud_signals": [],
+        "fraud_reasoning": None,
+        "metadata": {},
         "progress": 0,
         "requires_upload": False,
         "capture_target": None,
@@ -156,9 +160,10 @@ def _ui_step_and_label(stage: str) -> tuple[int, str]:
         "data_capture": (1, "Detail Capture"),
         "doc_verification": (2, "Identity Verification"),
         "kyc_approval": (3, "KYC review"),
-        "aml_screening": (4, "AML Screening"),
+        "aml_screening": (3, "AML Screening"),
         "fraud_check": (4, "Fraud Check"),
-        "complete": (4, "Complete"),
+        "manual_review": (4, "Manual Review"),
+        "complete": (5, "Account Activated"),
         "rejected": (1, "Application rejected"),
     }
     return mapping.get(stage, (1, "Detail Capture"))
@@ -202,6 +207,10 @@ async def chat_endpoint(request: ChatRequest):
             current_main_step=main_step,
             aml_status=latest_state.get("aml_status", "pending"),
             aml_in_background=latest_state.get("aml_in_background", False),
+            fraud_status=latest_state.get("fraud_status"),
+            fraud_risk_score=latest_state.get("fraud_risk_score"),
+            fraud_signals=latest_state.get("fraud_signals", []),
+            fraud_reasoning=latest_state.get("fraud_reasoning"),
         )
     except Exception as e:
         print(f"Error handling chat: {e}")

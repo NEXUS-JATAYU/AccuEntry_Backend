@@ -15,3 +15,7 @@ class ChatResponse(BaseModel):
     current_main_step: str = "Detail Capture"
     aml_status: str | None = "pending"
     aml_in_background: bool = False
+    fraud_status: str | None = None
+    fraud_risk_score: int | None = None
+    fraud_signals: list[str] = []
+    fraud_reasoning: str | None = None

@@ -25,6 +25,7 @@ class OnboardingState(TypedDict):
         "kyc_approval",
         "aml_screening",
         "fraud_check",
+        "manual_review",
         "complete",
         "rejected",
     ]
@@ -53,6 +54,10 @@ class OnboardingState(TypedDict):
 
     # ── Fraud check ──────────────────────────────────────────
     fraud_status: Optional[str]     # "clear" | "flagged"
+    fraud_risk_score: Optional[int]
+    fraud_signals: list[str]
+    fraud_reasoning: Optional[str]
+    metadata: dict
 
     # ── Progress (0–100, sent to frontend) ───────────────────
     progress: int
