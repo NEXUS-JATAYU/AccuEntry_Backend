@@ -16,7 +16,38 @@ from state import OnboardingState
 
 
 def check_node(state: OnboardingState) -> dict[str, Any]:
-    _ = state
+    aml_status = state.get("aml_status")
+    aml_in_background = bool(state.get("aml_in_background"))
+
+    if aml_in_background or aml_status in (None, "pending", "checking"):
+        return {
+            "stage": "fraud_check",
+            "progress": max(state.get("progress", 0), 80),
+            "messages": [
+                {
+                    "role": "assistant",
+                    "text": (
+                        "AML screening is in progress. We will continue to final activation "
+                        "as soon as compliance checks finish."
+                    ),
+                }
+            ],
+        }
+
+    if aml_status == "flagged":
+        return {
+            "stage": "rejected",
+            "fraud_status": "flagged",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "text": (
+                        "We are unable to proceed with this application after compliance review."
+                    ),
+                }
+            ],
+        }
+
     return {
         "fraud_status": "clear",
         "stage": "complete",
