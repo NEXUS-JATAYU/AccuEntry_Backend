@@ -55,7 +55,7 @@ def _last_user_text(state: OnboardingState) -> str:
 
 
 def _llm() -> ChatOllama:
-    model = os.getenv("OLLAMA_MODEL", "gemma2:2b")
+    model =  "gemma2:2b"
     return ChatOllama(model=model, temperature=0)
 
 

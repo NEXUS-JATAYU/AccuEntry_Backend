@@ -13,3 +13,5 @@ class ChatResponse(BaseModel):
     completed: bool = False
     step: int = 1
     current_main_step: str = "Detail Capture"
+    aml_status: str | None = "pending"
+    aml_in_background: bool = False

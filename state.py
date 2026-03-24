@@ -45,7 +45,11 @@ class OnboardingState(TypedDict):
     kyc_status: Optional[str]       # "approved" | "rejected"
 
     # ── AML screening ────────────────────────────────────────
-    aml_status: Optional[str]       # "clear" | "flagged"
+    aml_status: Optional[str]       # "pending" | "checking" | "clear" | "flagged"
+    aml_raw_results: Optional[dict]  # raw output from all 4 tool calls
+    aml_risk_score:  Optional[int]
+    aml_in_background: bool
+    aml_completed: bool
 
     # ── Fraud check ──────────────────────────────────────────
     fraud_status: Optional[str]     # "clear" | "flagged"

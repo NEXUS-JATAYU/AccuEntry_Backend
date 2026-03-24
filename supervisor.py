@@ -9,7 +9,7 @@ from typing import Any, Final
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from agents.aml.aml_screening import build_aml_screening_graph
+from agents.aml.aml_screening import build_aml_graph
 from agents.doc_verification.doc_verify import build_doc_verify_graph
 from agents.fraud_check.fraud_check import build_fraud_check_graph
 from agents.doc_verification.kyc_approval import build_kyc_approval_graph
@@ -63,7 +63,7 @@ def build_supervisor() -> CompiledStateGraph:
     workflow.add_node("data_capture", build_data_capture_graph())
     workflow.add_node("doc_verification", build_doc_verify_graph())
     workflow.add_node("kyc_approval", build_kyc_approval_graph())
-    workflow.add_node("aml_screening", build_aml_screening_graph())
+    workflow.add_node("aml_screening", build_aml_graph())
     workflow.add_node("fraud_check", build_fraud_check_graph())
 
     # Stage-driven entry (replaces a fixed set_entry_point("data_capture") so

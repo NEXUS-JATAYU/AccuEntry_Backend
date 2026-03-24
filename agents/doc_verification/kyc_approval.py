@@ -48,12 +48,12 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
     if status == "kyc_approved":
         return {
             "kyc_status": "approved",
-            "stage": "aml_screening",
+            "stage": "fraud_check",
             "progress": 65,
             "messages": [
                 {
                     "role": "assistant",
-                    "text": "KYC approved. Proceeding to AML screening.",
+                    "text": "KYC approved. Continuing to final checks while AML screening runs in the background.",
                 }
             ],
         }
