@@ -9,11 +9,11 @@ from typing import Any, Final
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from agents.aml_screening import build_aml_screening_graph
-from agents.doc_verify import build_doc_verify_graph
-from agents.fraud_check import build_fraud_check_graph
-from agents.kyc_approval import build_kyc_approval_graph
-from data_capture.data_capture import build_data_capture_graph
+from agents.aml.aml_screening import build_aml_screening_graph
+from agents.doc_verification.doc_verify import build_doc_verify_graph
+from agents.fraud_check.fraud_check import build_fraud_check_graph
+from agents.doc_verification.kyc_approval import build_kyc_approval_graph
+from agents.data_capture.data_capture import build_data_capture_graph
 from state import OnboardingState
 
 STAGE_TO_NODE: Final[dict[str, str]] = {

@@ -12,7 +12,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from data_capture.data_capture_validator import (
+from agents.data_capture.data_capture_validator import (
     validate_date,
     validate_name,
     validate_pan,
