@@ -412,7 +412,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         return {
             "stage": "fraud_check",
             "progress": max(state.get("progress", 0), 80),
-            "messages": list(state.get("messages", [])) + [
+            "messages": [
                 {
                     "role": "assistant",
                     "text": (
@@ -427,7 +427,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         return {
             "stage": "rejected",
             "fraud_status": "flagged",
-            "messages": list(state.get("messages", [])) + [
+            "messages": [
                 {
                     "role": "assistant",
                     "text": "We are unable to proceed with this application after compliance review.",
@@ -488,7 +488,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             "fraud_status": "rejected",
             "fraud_risk_score": risk_score,
             "fraud_signals": all_signals,
-            "messages": list(state.get("messages", [])) + [
+            "messages": [
                 {
                     "role": "assistant",
                     "text": "We are unable to proceed with this application at this time.",
@@ -504,7 +504,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             "fraud_signals": all_signals,
             "fraud_reasoning": reasoning,
             "progress": 92,
-            "messages": list(state.get("messages", [])) + [
+            "messages": [
                 {
                     "role": "assistant",
                     "text": (
@@ -522,7 +522,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         "fraud_signals": all_signals,
         "stage": "complete",  # ← FIX: transition to complete, not back to fraud_check
         "progress": 100,
-        "messages": list(state.get("messages", [])) + [
+        "messages": [
             {
                 "role": "assistant",
                 "text": (

@@ -11,6 +11,7 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from core.http_client_pool import get_http_client
 from state import OnboardingState
 
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:8001").rstrip("/")
@@ -19,16 +20,16 @@ ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:8001").rstrip("/"
 async def check_node(state: OnboardingState) -> dict[str, Any]:
     url = f"{ACCUVERIFY_URL.rstrip('/')}/agent/approve-kyc"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                url,
-                params={
-                    "user_id": state["session_id"],
-                    "agent_id": "accuentry-bot",
-                },
-            )
-            resp.raise_for_status()
-            body = resp.json()
+        client = get_http_client()
+        resp = await client.post(
+            url,
+            params={
+                "user_id": state["session_id"],
+                "agent_id": "accuentry-bot",
+            },
+        )
+        resp.raise_for_status()
+        body = resp.json()
     except (httpx.HTTPError, ValueError):
         return {
             "stage": "rejected",

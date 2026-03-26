@@ -11,6 +11,7 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from core.http_client_pool import get_http_client
 from state import OnboardingState
 
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:8001")
@@ -39,10 +40,10 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
     base: dict[str, Any] = {"doc_failure_type": None}
     url = f"{ACCUVERIFY_URL.rstrip('/')}/kyc/status"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params={"user_id": state["session_id"]})
-            resp.raise_for_status()
-            data = resp.json()
+        client = get_http_client()
+        resp = await client.get(url, params={"user_id": state["session_id"]})
+        resp.raise_for_status()
+        data = resp.json()
     except (httpx.HTTPError, ValueError):
         base["messages"] = [
             {

@@ -7,6 +7,7 @@ from schemas.chat import ChatRequest, ChatResponse
 from supervisor import onboarding_graph
 from state import OnboardingState
 from core.database import engine, Base
+from core.http_client_pool import close_http_client, get_http_client
 from agents.aml.aml_screening import build_aml_graph
 import models.customer_info
 from scripts.init_aml_indices import init_aml_indices
@@ -30,6 +31,7 @@ app.add_middleware(
 sessions: dict[str, OnboardingState] = {}
 aml_tasks: dict[str, asyncio.Task] = {}
 aml_graph = build_aml_graph()
+MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "120"))
 
 print(f"Using AccuVerify URL: {ACCUVERIFY_URL}")
 def _initial_onboarding_state(session_id: str) -> OnboardingState:
@@ -39,9 +41,29 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "stage": "data_capture",
         "full_name": None,
         "dob": None,
+        "gender": None,
+        "marital_status": None,
         "pan_number": None,
+        "nationality": None,
+        "occupation_type": None,
+        "annual_income": None,
+        "source_of_funds": None,
+        "politically_exposed": None,
+        "mobile_number": None,
+        "email_id": None,
+        "id_proof_type": None,
+        "id_proof_number": None,
         "address": None,
         "account_type": None,
+        "mode_of_operation": None,
+        "debit_card_required": None,
+        "internet_banking": None,
+        "mobile_banking": None,
+        "sms_alerts": None,
+        "cheque_book": None,
+        "nominee_name": None,
+        "nominee_relationship": None,
+        "nominee_dob": None,
         "pan_verified": None,
         "aadhaar_verified": None,
         "face_verified": None,
@@ -103,15 +125,15 @@ async def _run_aml_background(session_id: str) -> None:
             "aml_completed": result.get("aml_status") in ("clear", "flagged"),
         }
 
-        sessions[session_id] = updated
+        sessions[session_id] = _trim_messages(updated)
     except Exception as exc:
         latest = sessions.get(session_id)
         if latest:
-            sessions[session_id] = {
+            sessions[session_id] = _trim_messages({
                 **latest,
                 "aml_in_background": False,
                 "aml_status": "pending",
-            }
+            })
         print(f"Background AML task failed for {session_id}: {exc}")
     finally:
         aml_tasks.pop(session_id, None)
@@ -139,6 +161,13 @@ def _last_assistant_text(messages: list[dict]) -> str:
         if m.get("role") == "assistant":
             return (m.get("text") or "").strip()
     return ""
+
+
+def _trim_messages(state: OnboardingState) -> OnboardingState:
+    msgs = state.get("messages", [])
+    if len(msgs) <= MAX_SESSION_MESSAGES:
+        return state
+    return {**state, "messages": list(msgs[-MAX_SESSION_MESSAGES:])}
 
 
 def _fallback_assistant_message(stage: str, requires_upload: bool) -> str:
@@ -182,7 +211,7 @@ async def chat_endpoint(request: ChatRequest):
             state,
             config={"recursion_limit": 50},
         )
-        sessions[sid] = new_state
+        sessions[sid] = _trim_messages(new_state)
         _start_aml_if_needed(sid)
 
         latest_state = sessions[sid]
@@ -216,42 +245,48 @@ async def chat_endpoint(request: ChatRequest):
 
 @app.post("/kyc/pan")
 async def proxy_pan(session_id: str = Form(...), file: UploadFile = File(...)):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{ACCUVERIFY_URL}/upload-pan",
-            params={"user_id": session_id},
-            files={"file": (file.filename, await file.read(), file.content_type)},
-        )
+    client = get_http_client()
+    resp = await client.post(
+        f"{ACCUVERIFY_URL}/upload-pan",
+        params={"user_id": session_id},
+        files={"file": (file.filename, await file.read(), file.content_type)},
+    )
     return resp.json()
 
 
 @app.post("/kyc/aadhaar")
 async def proxy_aadhaar(session_id: str = Form(...), file: UploadFile = File(...)):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{ACCUVERIFY_URL}/upload-aadhaar",
-            params={"user_id": session_id},
-            files={"file": (file.filename, await file.read(), file.content_type)},
-        )
+    client = get_http_client()
+    resp = await client.post(
+        f"{ACCUVERIFY_URL}/upload-aadhaar",
+        params={"user_id": session_id},
+        files={"file": (file.filename, await file.read(), file.content_type)},
+    )
     return resp.json()
 
 
 @app.post("/kyc/selfie")
 async def proxy_selfie(session_id: str = Form(...), file: UploadFile = File(...)):
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-        resp = await client.post(
-            f"{ACCUVERIFY_URL}/upload-selfie",
-            params={"user_id": session_id},
-            files={"file": (file.filename, await file.read(), file.content_type)},
-        )
+    client = get_http_client()
+    resp = await client.post(
+        f"{ACCUVERIFY_URL}/upload-selfie",
+        params={"user_id": session_id},
+        files={"file": (file.filename, await file.read(), file.content_type)},
+        timeout=httpx.Timeout(60.0),
+    )
     return resp.json()
 
 
 @app.post("/kyc/approve")
 async def proxy_approve(session_id: str = Form(...)):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{ACCUVERIFY_URL}/agent/approve-kyc",
-            params={"user_id": session_id, "agent_id": "accuentry-bot"},
-        )
+    client = get_http_client()
+    resp = await client.post(
+        f"{ACCUVERIFY_URL}/agent/approve-kyc",
+        params={"user_id": session_id, "agent_id": "accuentry-bot"},
+    )
     return resp.json()
+
+
+@app.on_event("shutdown")
+async def _shutdown_http_pool() -> None:
+    await close_http_client()

@@ -75,7 +75,7 @@ def auto_clear_node(state: OnboardingState) -> dict[str, Any]:
         "aml_status": "clear",
         "stage": "fraud_check",
         "progress": 80,
-        "messages": state["messages"] + [{
+        "messages": [{
             "role": "assistant",
             "text": "AML screening complete — all checks passed. "
                     "Proceeding to the final fraud check."
@@ -90,7 +90,7 @@ def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
         "aml_status": "flagged",
         "stage": "rejected",
         "progress": state.get("progress", 70),
-        "messages": state["messages"] + [{
+        "messages": [{
             "role": "assistant",
             "text": "We are unable to proceed with your application at "
                     "this time. Our compliance team will be in touch if "
