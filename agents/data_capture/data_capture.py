@@ -1,38 +1,92 @@
 """
-Data capture LangGraph subgraph: collects five onboarding fields into OnboardingState.
+Data capture LangGraph subgraph: collects onboarding fields into OnboardingState.
 
-Flow per invoke: entry_node → capture_node (LLM) → validate_node → END.
+Flow per invoke: entry_node -> capture_node (LLM) -> validate_node -> END.
 """
 
 from __future__ import annotations
+
 import os
 from typing import Any, Optional
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from agents.data_capture.data_capture_validator import (
+from agents.data_capture.data_capture_validators import (
+    parse_skip,
+    validate_address,
+    validate_amount,
+    validate_choice,
     validate_date,
+    validate_email,
+    validate_id_proof_number,
+    validate_mobile_number,
     validate_name,
     validate_pan,
+    validate_yes_no,
 )
 from state import OnboardingState
 
 FIELD_ORDER: tuple[str, ...] = (
+    "account_type",
     "full_name",
     "dob",
+    "gender",
+    "marital_status",
     "pan_number",
+    "nationality",
+    "occupation_type",
+    "annual_income",
+    "source_of_funds",
+    "politically_exposed",
+    "mobile_number",
+    "email_id",
+    "id_proof_type",
+    "id_proof_number",
     "address",
-    "account_type",
+    "mode_of_operation",
 )
 
 FIELD_QUESTIONS: dict[str, str] = {
-    "full_name": "Enter full name:",
-    "dob": "Enter DOB (YYYY-MM-DD):",
-    "pan_number": "Enter PAN:",
-    "address": "Enter address:",
-    "account_type": "Enter account type (Savings/Current):",
+    "full_name": "Enter your full name (as per ID proof):",
+    "dob": "Enter your date of birth (YYYY-MM-DD):",
+    "gender": "Enter your gender (Male / Female / Third Gender):",
+    "marital_status": "Enter marital status (Married / Unmarried / Others):",
+    "pan_number": "Enter your PAN number:",
+    "nationality": "Are you an Indian resident? (Yes / No):",
+    "occupation_type": "Enter occupation type (Pvt. Sector / Govt / Business / Student / Retired / Other):",
+    "annual_income": "Enter your approximate annual income (in Rs.):",
+    "source_of_funds": "Enter source of funds (Salary / Business Income / Agriculture / Investment / Pension / Others):",
+    "politically_exposed": "Are you a Politically Exposed Person? (Yes / No / Related to one):",
+    "mobile_number": "Enter your 10-digit mobile number:",
+    "email_id": "Enter your email address:",
+    "id_proof_type": "Enter ID proof type (Passport / Voter ID / Driving Licence / Aadhaar / NREGA Job Card):",
+    "id_proof_number": "Enter the document number of your ID proof:",
+    "address": "Enter your full address (street, city, district, state, PIN, country):",
+    "account_type": "Enter account type (Savings / Current / Fixed Deposit / Recurring Deposit):",
+    "mode_of_operation": "Enter mode of operation (Self / Either or Survivor / Former or Survivor / Jointly Operated):",
+    "debit_card_required": "Do you need an ATM-cum-Debit card? (Yes / No):",
+    "internet_banking": "Do you require Internet Banking? (Yes / No):",
+    "mobile_banking": "Do you require Mobile Banking? (Yes / No):",
+    "sms_alerts": "Do you want SMS alerts on your registered mobile? (Yes / No):",
+    "cheque_book": "Do you require a Cheque Book? (Yes / No):",
+    "nominee_name": "Enter nominee's full name (or type 'skip' to skip nomination):",
+    "nominee_relationship": "Enter nominee's relationship with you (Spouse / Parent / Child / Sibling / Other):",
+    "nominee_dob": "Enter nominee's date of birth (YYYY-MM-DD):",
+}
+
+CHOICES: dict[str, list[str]] = {
+    "gender": ["Male", "Female", "Third Gender"],
+    "marital_status": ["Married", "Unmarried", "Others"],
+    "occupation_type": ["Pvt. Sector", "Govt", "Business", "Student", "Retired", "Other"],
+    "source_of_funds": ["Salary", "Business Income", "Agriculture", "Investment", "Pension", "Others"],
+    "politically_exposed": ["Yes", "No", "Related to one"],
+    "id_proof_type": ["Passport", "Voter ID", "Driving Licence", "Aadhaar", "NREGA Job Card"],
+    "account_type": ["Savings", "Current", "Fixed Deposit", "Recurring Deposit"],
+    "mode_of_operation": ["Self", "Either or Survivor", "Former or Survivor", "Jointly Operated"],
+    "nominee_relationship": ["Spouse", "Parent", "Child", "Sibling", "Other"],
 }
 
 
@@ -55,7 +109,7 @@ def _last_user_text(state: OnboardingState) -> str:
 
 
 def _llm() -> ChatOllama:
-    model =  "gemma2:2b"
+    model = os.getenv("OLLAMA_MODEL", "gemma2:2b")
     return ChatOllama(model=model, temperature=0)
 
 
@@ -76,11 +130,8 @@ def entry_node(state: OnboardingState) -> dict[str, Any]:
     if target is None:
         return out
 
-    # Only ask the question if we haven't already asked it
-    # (avoid duplicate questions for the same field)
     current_target = state.get("capture_target")
     if current_target == target:
-        # We're already asking for this field, don't ask again
         return out
 
     msgs = state.get("messages", [])
@@ -99,21 +150,29 @@ async def capture_node(state: OnboardingState) -> dict[str, Any]:
     if not user_text:
         return {"capture_candidate": None}
 
+    options = CHOICES.get(target)
+    options_text = f"Allowed values: {', '.join(options)}. " if options else ""
+
     llm = _get_llm()
     system = SystemMessage(
         content=(
-            f"You extract a single field for a bank onboarding form. "
-            f'Field name: "{target}". '
-            "Reply with only the extracted value, no quotes or explanation. "
-            'If the field is account_type, reply with exactly "Savings" or "Current" '
-            "when possible; otherwise reply with the user\u2019s wording. "
+            "You extract a single field for a bank onboarding form. "
+            f"Field name: {target}. "
+            f"Question shown to user: {FIELD_QUESTIONS[target]} "
+            f"{options_text}"
+            "Reply with only the extracted value, no explanation. "
             "If nothing relevant is present, reply with an empty string."
         )
     )
     human = HumanMessage(content=user_text)
-    resp = await llm.ainvoke([system, human])
-    raw = (getattr(resp, "content", None) or "").strip()
-    return {"capture_candidate": raw if raw else None}
+    timeout_s = float(os.getenv("DATA_CAPTURE_LLM_TIMEOUT_S", "8"))
+    try:
+        resp = await llm.ainvoke([system, human], config={"timeout": timeout_s})
+        raw = (getattr(resp, "content", None) or "").strip()
+        return {"capture_candidate": raw if raw else None}
+    except Exception:
+        # Fallback keeps turn latency bounded if LLM is slow/unavailable.
+        return {"capture_candidate": user_text}
 
 
 def validate_node(state: OnboardingState) -> dict[str, Any]:
@@ -128,13 +187,10 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
                 "capture_candidate": None,
                 "capture_error": None,
                 "capture_target": None,
-                "messages": list(state.get("messages", [])) + [
+                "messages": [
                     {
                         "role": "assistant",
-                        "text": (
-                            "Your details are saved. Next, we\u2019ll verify your "
-                            "documents (PAN, Aadhaar, and selfie)."
-                        ),
+                        "text": "Your details are saved. Next, we will verify your documents (PAN, Aadhaar, and selfie).",
                     }
                 ],
             }
@@ -146,13 +202,10 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
         return {
             "capture_error": "empty",
             "capture_candidate": None,
-            "messages": list(state.get("messages", [])) + [
+            "messages": [
                 {
                     "role": "assistant",
-                    "text": (
-                        "I couldn\u2019t read a value for that. "
-                        f"Please try again: {FIELD_QUESTIONS[target]}"
-                    ),
+                    "text": f"I could not read a value for that. Please try again: {FIELD_QUESTIONS[target]}",
                 }
             ],
         }
@@ -160,46 +213,98 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
     key = target
     value = candidate
 
-    if key == "account_type":
-        val = value.lower()
-        if "saving" in val:
-            normalized = "Savings"
-        elif "current" in val or "checking" in val:
-            normalized = "Current"
-        else:
-            return {
-                "capture_error": "account_type",
-                "capture_candidate": None,
-                "messages": list(state.get("messages", [])) + [
-                    {
-                        "role": "assistant",
-                        "text": "Please choose Savings or Current account.",
-                    },
-                ],
-            }
-        return _apply_success(state, key, normalized)
-
     if key == "full_name":
         ok, result = validate_name(value)
         if not ok:
             return _validation_fail(result, state)
-        return _apply_success(state, key, result)
+        return _apply_success(state, {key: result})
 
     if key == "dob":
         ok, result = validate_date(value)
         if not ok:
             return _validation_fail(result, state)
-        return _apply_success(state, key, result)
+        return _apply_success(state, {key: result})
+
+    if key in ("gender", "marital_status", "occupation_type", "source_of_funds", "id_proof_type", "account_type", "mode_of_operation", "nominee_relationship"):
+        ok, result = validate_choice(value, CHOICES[key], key.replace("_", " "))
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
 
     if key == "pan_number":
         ok, result = validate_pan(value)
         if not ok:
             return _validation_fail(result, state)
-        return _apply_success(state, key, result)
+        return _apply_success(state, {key: result})
+
+    if key == "nationality":
+        ok, result = validate_yes_no(value, "nationality")
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "annual_income":
+        ok, result = validate_amount(value, "annual income")
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "politically_exposed":
+        ok, result = validate_choice(value, CHOICES[key], "politically exposed")
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "mobile_number":
+        ok, result = validate_mobile_number(value)
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "email_id":
+        ok, result = validate_email(value)
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "id_proof_number":
+        ok, result = validate_id_proof_number(value)
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
 
     if key == "address":
-        cleaned = value.strip()
-        return _apply_success(state, key, cleaned)
+        ok, result = validate_address(value)
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key in ("debit_card_required", "internet_banking", "mobile_banking", "sms_alerts", "cheque_book"):
+        ok, result = validate_yes_no(value, key.replace("_", " "))
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "nominee_name":
+        if parse_skip(value) == "skip":
+            return _apply_success(
+                state,
+                {
+                    "nominee_name": "SKIPPED",
+                    "nominee_relationship": "SKIPPED",
+                    "nominee_dob": "SKIPPED",
+                },
+            )
+        ok, result = validate_name(value)
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
+
+    if key == "nominee_dob":
+        ok, result = validate_date(value)
+        if not ok:
+            return _validation_fail(result, state)
+        return _apply_success(state, {key: result})
 
     return {}
 
@@ -208,17 +313,14 @@ def _validation_fail(message: str, state: OnboardingState) -> dict[str, Any]:
     return {
         "capture_error": "validation",
         "capture_candidate": None,
-        "messages": list(state.get("messages", [])) + [{"role": "assistant", "text": message}],
+        "messages": [{"role": "assistant", "text": message}],
     }
 
 
-def _apply_success(
-    state: OnboardingState,
-    field_key: str,
-    normalized: str,
-) -> dict[str, Any]:
+def _apply_success(state: OnboardingState, updates: dict[str, str]) -> dict[str, Any]:
     vals: dict[str, Optional[str]] = {k: state.get(k) for k in FIELD_ORDER}  # type: ignore[misc]
-    vals[field_key] = normalized
+    for k, v in updates.items():
+        vals[k] = v
 
     next_missing: Optional[str] = None
     for k in FIELD_ORDER:
@@ -227,31 +329,30 @@ def _apply_success(
             break
 
     filled_count = sum(1 for k in FIELD_ORDER if _is_set(vals.get(k)))
-    progress = 25 if next_missing is None else min(24, filled_count * 5)
+    progress = 25 if next_missing is None else int((filled_count / len(FIELD_ORDER)) * 24)
 
     merged: dict[str, Any] = {
-        field_key: normalized,
+        **updates,
         "capture_candidate": None,
         "capture_error": None,
-        "capture_target": None,
+        "capture_target": next_missing,
         "progress": progress,
     }
 
     if next_missing is None:
         merged["stage"] = "doc_verification"
         merged["progress"] = 25
-        merged["messages"] = list(state.get("messages", [])) + [
+        merged["messages"] = [
             {
                 "role": "assistant",
-                "text": (
-                    "Your details are saved. Next, we\u2019ll verify your "
-                    "documents (PAN, Aadhaar, and selfie)."
-                ),
+                "text": "Your details are saved. Next, we will verify your documents (PAN, Aadhaar, and selfie).",
             }
         ]
         return merged
 
-    merged["messages"] = list(state.get("messages", [])) + [{"role": "assistant", "text": FIELD_QUESTIONS[next_missing]}]
+    merged["messages"] = [
+        {"role": "assistant", "text": FIELD_QUESTIONS[next_missing]}
+    ]
     return merged
 
 
