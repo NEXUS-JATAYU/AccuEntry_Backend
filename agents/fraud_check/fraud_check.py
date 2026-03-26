@@ -412,7 +412,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         return {
             "stage": "fraud_check",
             "progress": max(state.get("progress", 0), 80),
-            "messages": [
+            "messages": list(state.get("messages", [])) + [
                 {
                     "role": "assistant",
                     "text": (
@@ -427,7 +427,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         return {
             "stage": "rejected",
             "fraud_status": "flagged",
-            "messages": [
+            "messages": list(state.get("messages", [])) + [
                 {
                     "role": "assistant",
                     "text": "We are unable to proceed with this application after compliance review.",
@@ -488,7 +488,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             "fraud_status": "rejected",
             "fraud_risk_score": risk_score,
             "fraud_signals": all_signals,
-            "messages": [
+            "messages": list(state.get("messages", [])) + [
                 {
                     "role": "assistant",
                     "text": "We are unable to proceed with this application at this time.",
@@ -504,7 +504,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             "fraud_signals": all_signals,
             "fraud_reasoning": reasoning,
             "progress": 92,
-            "messages": [
+            "messages": list(state.get("messages", [])) + [
                 {
                     "role": "assistant",
                     "text": (
@@ -520,13 +520,13 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         "fraud_status": "clear",
         "fraud_risk_score": risk_score,
         "fraud_signals": all_signals,
-        "stage": "fraud_check",
-        "progress": 92,
-        "messages": [
+        "stage": "complete",  # ← FIX: transition to complete, not back to fraud_check
+        "progress": 100,
+        "messages": list(state.get("messages", [])) + [
             {
                 "role": "assistant",
                 "text": (
-                    "Fraud checks cleared. Finalizing account activation..."
+                    "Fraud checks cleared. Your account is now activated. Welcome to AccuEntry."
                 ),
             }
         ],

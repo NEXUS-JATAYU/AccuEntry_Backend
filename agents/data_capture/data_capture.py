@@ -76,6 +76,13 @@ def entry_node(state: OnboardingState) -> dict[str, Any]:
     if target is None:
         return out
 
+    # Only ask the question if we haven't already asked it
+    # (avoid duplicate questions for the same field)
+    current_target = state.get("capture_target")
+    if current_target == target:
+        # We're already asking for this field, don't ask again
+        return out
+
     msgs = state.get("messages", [])
     last_is_user = bool(msgs) and msgs[-1].get("role") == "user"
     if not last_is_user:
@@ -121,7 +128,7 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
                 "capture_candidate": None,
                 "capture_error": None,
                 "capture_target": None,
-                "messages": [
+                "messages": list(state.get("messages", [])) + [
                     {
                         "role": "assistant",
                         "text": (
@@ -139,7 +146,7 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
         return {
             "capture_error": "empty",
             "capture_candidate": None,
-            "messages": [
+            "messages": list(state.get("messages", [])) + [
                 {
                     "role": "assistant",
                     "text": (
@@ -163,7 +170,7 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
             return {
                 "capture_error": "account_type",
                 "capture_candidate": None,
-                "messages": [
+                "messages": list(state.get("messages", [])) + [
                     {
                         "role": "assistant",
                         "text": "Please choose Savings or Current account.",
@@ -175,19 +182,19 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
     if key == "full_name":
         ok, result = validate_name(value)
         if not ok:
-            return _validation_fail(result)
+            return _validation_fail(result, state)
         return _apply_success(state, key, result)
 
     if key == "dob":
         ok, result = validate_date(value)
         if not ok:
-            return _validation_fail(result)
+            return _validation_fail(result, state)
         return _apply_success(state, key, result)
 
     if key == "pan_number":
         ok, result = validate_pan(value)
         if not ok:
-            return _validation_fail(result)
+            return _validation_fail(result, state)
         return _apply_success(state, key, result)
 
     if key == "address":
@@ -197,11 +204,11 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
     return {}
 
 
-def _validation_fail(message: str) -> dict[str, Any]:
+def _validation_fail(message: str, state: OnboardingState) -> dict[str, Any]:
     return {
         "capture_error": "validation",
         "capture_candidate": None,
-        "messages": [{"role": "assistant", "text": message}],
+        "messages": list(state.get("messages", [])) + [{"role": "assistant", "text": message}],
     }
 
 
@@ -233,7 +240,7 @@ def _apply_success(
     if next_missing is None:
         merged["stage"] = "doc_verification"
         merged["progress"] = 25
-        merged["messages"] = [
+        merged["messages"] = list(state.get("messages", [])) + [
             {
                 "role": "assistant",
                 "text": (
@@ -244,7 +251,7 @@ def _apply_success(
         ]
         return merged
 
-    merged["messages"] = [{"role": "assistant", "text": FIELD_QUESTIONS[next_missing]}]
+    merged["messages"] = list(state.get("messages", [])) + [{"role": "assistant", "text": FIELD_QUESTIONS[next_missing]}]
     return merged
 
 

@@ -18,9 +18,9 @@ llm = ChatOllama(model="gemma2:2b", max_tokens=256)
 
 async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
     """
-    Fires all 4 tool calls at the same time with asyncio.gather.
-    Each tool is a synchronous MongoDB query wrapped in a thread executor
-    so the event loop is never blocked.
+    Fires checks more efficiently:
+    1. Run RBI, OFAC, PEP checks in parallel
+    2. Evaluate risk rules once with real scores (no placeholder/re-run)
     """
     loop = asyncio.get_event_loop()
 
@@ -30,20 +30,13 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
                                      state["full_name"])
     pep_task  = loop.run_in_executor(None, check_pep_list,
                                      state["full_name"])
-    rules_task = loop.run_in_executor(None, evaluate_risk_rules,
-        state["full_name"],
-        state.get("dob"),
-        state.get("account_type", ""),
-        0,   # placeholder — overwritten after ofac result
-        0,   # placeholder — overwritten after pep result
+
+    # Wait for all three checks to complete
+    rbi, ofac, pep = await asyncio.gather(
+        rbi_task, ofac_task, pep_task
     )
 
-    rbi, ofac, pep, rules = await asyncio.gather(
-        rbi_task, ofac_task, pep_task, rules_task
-    )
-
-    # Re-run risk rules now that we have the real fuzzy scores
-    # (the two score-dependent rules need ofac/pep scores)
+    # Now run rules once with real scores from OFAC/PEP
     rules = evaluate_risk_rules(
         state["full_name"],
         state.get("dob"),

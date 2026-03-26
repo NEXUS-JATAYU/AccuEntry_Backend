@@ -9,9 +9,13 @@ from state import OnboardingState
 from core.database import engine, Base
 from agents.aml.aml_screening import build_aml_graph
 import models.customer_info
+from scripts.init_aml_indices import init_aml_indices
 
 # Initialize DB tables
 Base.metadata.create_all(bind=engine)
+
+# Initialize AML MongoDB indices
+init_aml_indices()
 
 app = FastAPI()
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:8001").rstrip("/")
@@ -93,18 +97,11 @@ async def _run_aml_background(session_id: str) -> None:
             "aml_raw_results": result.get("aml_raw_results", latest.get("aml_raw_results")),
             "aml_risk_score": result.get("aml_risk_score", latest.get("aml_risk_score")),
             "aml_status": result.get("aml_status", latest.get("aml_status", "pending")),
+            "stage": result.get("stage", latest.get("stage")),  # ← FIX: propagate stage from AML result
+            "messages": result.get("messages", latest.get("messages", [])),  # ← FIX: propagate messages
             "aml_in_background": False,
             "aml_completed": result.get("aml_status") in ("clear", "flagged"),
         }
-
-        if updated.get("aml_status") == "flagged":
-            updated["stage"] = "rejected"
-            updated["messages"] = list(latest.get("messages", [])) + [
-                {
-                    "role": "assistant",
-                    "text": "AML screening has flagged this application. We are unable to proceed.",
-                }
-            ]
 
         sessions[session_id] = updated
     except Exception as exc:

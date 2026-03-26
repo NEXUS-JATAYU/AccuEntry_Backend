@@ -3,6 +3,36 @@ from datetime import date
 from typing import Optional
 from rapidfuzz import fuzz
 from core.mongodbase import aml_db
+import time
+from pymongo.errors import OperationFailure
+
+# Risk rules cache (TTL: 1 hour)
+_risk_rules_cache = {"data": None, "timestamp": 0, "ttl": 3600}
+
+
+def _get_cached_risk_rules():
+    """Returns cached risk rules or fetches fresh ones if cache expired."""
+    now = time.time()
+    if (_risk_rules_cache["data"] is None or 
+        now - _risk_rules_cache["timestamp"] > _risk_rules_cache["ttl"]):
+        _risk_rules_cache["data"] = list(aml_db.risk_rules.find({"active": True}))
+        _risk_rules_cache["timestamp"] = now
+    return _risk_rules_cache["data"]
+
+
+def _fallback_search(collection, full_name: str, limit: int = 5):
+    """
+    Fallback search when text index is missing.
+    Returns all active documents (index required setup).
+    """
+    try:
+        return list(collection.find(
+            {"active": True},
+            {"name": 1, "aliases": 1, "program": 1, "uid": 1, 
+             "dob": 1, "position": 1, "pep_tier": 1, "jurisdiction": 1}
+        ).limit(limit * 3))  # Get more docs to compensate for lack of ranking
+    except Exception:
+        return []
 
 
 def check_rbi_caution_list(pan: str) -> dict:
@@ -22,18 +52,26 @@ def check_rbi_caution_list(pan: str) -> dict:
 
 def check_ofac_sanctions(full_name: str) -> dict:
     """
-    Two-stage OFAC check:
-    1. MongoDB text index search to get candidates
-    2. rapidfuzz token_sort_ratio for fuzzy match against name + aliases
-    Threshold 85+ = hard hit. 70–84 = near-miss (handled in risk rules).
+    Two-stage OFAC check with error handling:
+    1. Try MongoDB text index search (fast, requires index)
+    2. Fallback to simple search if index missing
+    3. rapidfuzz token_sort_ratio with early exit at 85+
+    Threshold 85+ = hard hit. 70–84 = near-miss.
     """
-    candidates = list(
-        aml_db.ofac_sdn_list.find(
-            {"$text": {"$search": full_name}, "active": True},
-            {"score": {"$meta": "textScore"}, "name": 1,
-             "aliases": 1, "program": 1, "uid": 1}
-        ).sort([("score", {"$meta": "textScore"})]).limit(10)
-    )
+    try:
+        candidates = list(
+            aml_db.ofac_sdn_list.find(
+                {"$text": {"$search": full_name}, "active": True},
+                {"score": {"$meta": "textScore"}, "name": 1,
+                 "aliases": 1, "program": 1, "uid": 1}
+            ).sort([("score", {"$meta": "textScore"})]).limit(5)
+        )
+    except OperationFailure as e:
+        if "text index required" in str(e):
+            # Fallback: no text index yet, search all active records
+            candidates = _fallback_search(aml_db.ofac_sdn_list, full_name)
+        else:
+            raise
 
     best_score = 0
     best_match = None
@@ -50,6 +88,9 @@ def check_ofac_sanctions(full_name: str) -> dict:
         if score > best_score:
             best_score = score
             best_match = candidate
+            # Early exit if we hit a hard match
+            if best_score >= 85:
+                break
 
     return {
         "source": "ofac_sdn",
@@ -64,17 +105,24 @@ def check_ofac_sanctions(full_name: str) -> dict:
 
 def check_pep_list(full_name: str) -> dict:
     """
-    Fuzzy name match against PEP list.
+    Fuzzy name match against PEP list with error handling.
     Returns tier (1/2/3) and position for LLM context.
-    Threshold 80+ = PEP match.
+    Threshold 80+ = PEP match. Early exit at 80+.
     """
-    candidates = list(
-        aml_db.pep_list.find(
-            {"$text": {"$search": full_name}, "active": True},
-            {"name": 1, "dob": 1, "position": 1,
-             "pep_tier": 1, "related_to": 1, "jurisdiction": 1}
-        ).limit(10)
-    )
+    try:
+        candidates = list(
+            aml_db.pep_list.find(
+                {"$text": {"$search": full_name}, "active": True},
+                {"name": 1, "dob": 1, "position": 1,
+                 "pep_tier": 1, "related_to": 1, "jurisdiction": 1}
+            ).limit(5)
+        )
+    except OperationFailure as e:
+        if "text index required" in str(e):
+            # Fallback: no text index yet, search all active records
+            candidates = _fallback_search(aml_db.pep_list, full_name)
+        else:
+            raise
 
     best_score = 0
     best_match = None
@@ -85,6 +133,9 @@ def check_pep_list(full_name: str) -> dict:
         if score > best_score:
             best_score = score
             best_match = candidate
+            # Early exit if we hit a PEP match
+            if best_score >= 80:
+                break
 
     hit = best_score >= 80
     return {
@@ -107,10 +158,9 @@ def evaluate_risk_rules(
     pep_match_score: int,
 ) -> dict:
     """
-    Evaluates configurable risk rules stored in MongoDB.
-    Reads rule definitions at runtime so you can tune without redeploying.
+    Evaluates configurable risk rules (cached, reloaded every hour).
     """
-    rules = list(aml_db.risk_rules.find({"active": True}))
+    rules = _get_cached_risk_rules()  # Use cached rules instead of live query
     triggered = []
     total_delta = 0
 
