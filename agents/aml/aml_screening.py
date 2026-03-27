@@ -46,6 +46,9 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
     )
 
     return {
+        "aml_status": "checking",
+        "aml_completed": False,
+        "aml_risk_score": state.get("aml_risk_score") or 0,
         "aml_raw_results": {
             "rbi":   rbi,
             "ofac":  ofac,
@@ -59,7 +62,11 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
 
 def aggregate_node(state: OnboardingState) -> dict[str, Any]:
     score = compute_risk_score(state["aml_raw_results"])
-    return {"aml_risk_score": score}
+    return {
+        "aml_status": "checking",
+        "aml_completed": False,
+        "aml_risk_score": score,
+    }
 
 
 # ── Routing function ─────────────────────────────────────────────
@@ -73,6 +80,7 @@ def route_node(state: OnboardingState) -> str:
 def auto_clear_node(state: OnboardingState) -> dict[str, Any]:
     return {
         "aml_status": "clear",
+        "aml_risk_score": int(state.get("aml_risk_score") or 0),
         "stage": "fraud_check",
         "progress": 80,
         "messages": [{
@@ -88,6 +96,7 @@ def auto_clear_node(state: OnboardingState) -> dict[str, Any]:
 def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
     return {
         "aml_status": "flagged",
+        "aml_risk_score": int(state.get("aml_risk_score") or 0),
         "stage": "rejected",
         "progress": state.get("progress", 70),
         "messages": [{

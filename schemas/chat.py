@@ -19,3 +19,4 @@ class ChatResponse(BaseModel):
     fraud_risk_score: int | None = None
     fraud_signals: list[str] = []
     fraud_reasoning: str | None = None
+    otp_required: bool = False

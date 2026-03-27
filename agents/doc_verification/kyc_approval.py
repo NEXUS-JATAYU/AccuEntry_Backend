@@ -18,6 +18,12 @@ ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:8001").rstrip("/"
 
 
 async def check_node(state: OnboardingState) -> dict[str, Any]:
+    base_kyc: dict[str, Any] = {
+        "kyc_data": state.get("kyc_data") or {},
+        "pan_verified": bool(state.get("pan_verified")),
+        "aadhaar_verified": bool(state.get("aadhaar_verified")),
+        "face_verified": bool(state.get("face_verified")),
+    }
     url = f"{ACCUVERIFY_URL.rstrip('/')}/agent/approve-kyc"
     try:
         client = get_http_client()
@@ -32,6 +38,7 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
         body = resp.json()
     except (httpx.HTTPError, ValueError):
         return {
+            **base_kyc,
             "stage": "rejected",
             "kyc_status": "rejected",
             "messages": [
@@ -47,7 +54,12 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
 
     status = body.get("status")
     if status == "kyc_approved":
+        kyc_data = body.get("kyc_data") or state.get("kyc_data") or {}
         return {
+            "kyc_data": kyc_data,
+            "pan_verified": bool(body.get("pan_verified", state.get("pan_verified"))),
+            "aadhaar_verified": bool(body.get("aadhaar_verified", state.get("aadhaar_verified"))),
+            "face_verified": bool(body.get("face_verified", state.get("face_verified"))),
             "kyc_status": "approved",
             "stage": "fraud_check",
             "progress": 65,
@@ -62,6 +74,7 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
     if status == "cannot_approve":
         reason = body.get("message") or "Automatic verification is not complete."
         return {
+            **base_kyc,
             "stage": "rejected",
             "kyc_status": "rejected",
             "messages": [
@@ -73,6 +86,7 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
         }
 
     return {
+        **base_kyc,
         "stage": "rejected",
         "kyc_status": "rejected",
         "messages": [

@@ -14,6 +14,8 @@ from agents.doc_verification.doc_verify import build_doc_verify_graph
 from agents.fraud_check.fraud_check import build_fraud_check_graph
 from agents.doc_verification.kyc_approval import build_kyc_approval_graph
 from agents.data_capture.data_capture import build_data_capture_graph
+from agents.decision.decision_tool import build_decision_graph
+from agents.decision.otp_verification import otp_verification_node
 from state import OnboardingState
 
 STAGE_TO_NODE: Final[dict[str, str]] = {
@@ -22,9 +24,11 @@ STAGE_TO_NODE: Final[dict[str, str]] = {
     "kyc_approval": "kyc_approval",
     "aml_screening": "aml_screening",
     "fraud_check": "fraud_check",
+    "decision_agent": "decision_agent",
+    "otp_verification": "otp_verification_handler",
 }
 
-SUBGRAPH_NODE_NAMES: Final[tuple[str, ...]] = tuple(STAGE_TO_NODE.values())
+SUBGRAPH_NODE_NAMES: Final[tuple[str, ...]] = tuple(set(STAGE_TO_NODE.values()))
 
 PATH_MAP: dict[Any, str] = {
     "data_capture": "data_capture",
@@ -32,6 +36,8 @@ PATH_MAP: dict[Any, str] = {
     "kyc_approval": "kyc_approval",
     "aml_screening": "aml_screening",
     "fraud_check": "fraud_check",
+    "decision_agent": "decision_agent",
+    "otp_verification_handler": "otp_verification_handler",
     END: END,
 }
 
@@ -47,7 +53,14 @@ def route(state: OnboardingState, completed: str | None = None) -> Any:
     the subgraph for the current stage.
     """
     stage = state["stage"]
-    if stage in ("complete", "rejected"):
+    if stage in (
+        "complete",
+        "rejected",
+        "otp_verification",
+        "manual_review",
+        "pending_docs",
+        "escalated",
+    ):
         return END
     target = STAGE_TO_NODE.get(stage)
     if target is None:
@@ -65,6 +78,8 @@ def build_supervisor() -> CompiledStateGraph:
     workflow.add_node("kyc_approval", build_kyc_approval_graph())
     workflow.add_node("aml_screening", build_aml_graph())
     workflow.add_node("fraud_check", build_fraud_check_graph())
+    workflow.add_node("decision_agent", build_decision_graph())
+    workflow.add_node("otp_verification_handler", otp_verification_node)
 
     # Stage-driven entry (replaces a fixed set_entry_point("data_capture") so
     # later stages are reachable on each new invoke).

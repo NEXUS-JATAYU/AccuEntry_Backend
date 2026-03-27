@@ -25,9 +25,13 @@ class OnboardingState(TypedDict):
         "kyc_approval",
         "aml_screening",
         "fraud_check",
+        "decision_agent",
         "manual_review",
+        "otp_verification",
         "complete",
         "rejected",
+        "pending_docs",
+        "escalated",
     ]
 
     # ── Data capture fields ──────────────────────────────────
@@ -78,6 +82,19 @@ class OnboardingState(TypedDict):
     fraud_signals: list[str]
     fraud_reasoning: Optional[str]
     metadata: dict
+
+    # ── Decision agent ───────────────────────────────────────
+    decision_reason: Optional[str]
+    decision_action: Optional[str]
+    pending_docs: list[str]
+    admin_override: bool
+    audit_session_id: str
+
+    # ── Upstream signals for decision agent ───────────────────
+    video_kyc_status: Optional[str]       # "verified" | "failed" | "pending" | None
+    risk_model_label: Optional[str]       # "clear" | "review" | "flagged"
+    risk_model_confidence: Optional[float]  # 0.0–1.0
+    kyc_data: Optional[dict]              # full_name, dob, pan, aadhaar, etc.
 
     # ── Progress (0–100, sent to frontend) ───────────────────
     progress: int

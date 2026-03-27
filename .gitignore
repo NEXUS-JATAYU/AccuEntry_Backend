@@ -23,7 +23,7 @@ dump.rdb
 # OS files
 .DS_Store
 Thumbs.db
-
+logs/audit
 # Logs
 *.log
 

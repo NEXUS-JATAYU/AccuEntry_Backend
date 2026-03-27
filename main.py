@@ -1,12 +1,13 @@
 import os
 import asyncio
-from fastapi import FastAPI, Form, UploadFile, File
+from fastapi import FastAPI, Form, UploadFile, File, Depends
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
 from schemas.chat import ChatRequest, ChatResponse
 from supervisor import onboarding_graph
 from state import OnboardingState
-from core.database import engine, Base
+from sqlalchemy.orm import Session
+from core.database import engine, Base, get_db
 from core.http_client_pool import close_http_client, get_http_client
 from agents.aml.aml_screening import build_aml_graph
 import models.customer_info
@@ -35,6 +36,7 @@ MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "120"))
 
 print(f"Using AccuVerify URL: {ACCUVERIFY_URL}")
 def _initial_onboarding_state(session_id: str) -> OnboardingState:
+    import uuid as _uuid
     return {
         "session_id": session_id,
         "messages": [],
@@ -84,6 +86,17 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "capture_candidate": None,
         "capture_error": None,
         "doc_failure_type": None,
+        # Decision agent fields
+        "decision_reason": None,
+        "decision_action": None,
+        "pending_docs": [],
+        "admin_override": False,
+        "audit_session_id": str(_uuid.uuid4()),
+        # Upstream signal fields for decision agent
+        "video_kyc_status": None,
+        "risk_model_label": None,
+        "risk_model_confidence": None,
+        "kyc_data": None,
     }
 
 
@@ -114,15 +127,27 @@ async def _run_aml_background(session_id: str) -> None:
         if not latest:
             return
 
+        pre_decision_stages = {"kyc_approval", "aml_screening", "fraud_check"}
+        latest_stage = latest.get("stage")
+        can_apply_aml_stage = latest_stage in pre_decision_stages
+
+        new_messages = result.get("messages", [])
+        old_messages = aml_input.get("messages", [])
+        aml_appended_messages = new_messages[len(old_messages):] if len(new_messages) >= len(old_messages) else []
+        if not can_apply_aml_stage:
+            aml_appended_messages = []
+
+        resolved_aml_status = result.get("aml_status", latest.get("aml_status", "pending"))
+
         updated: OnboardingState = {
             **latest,
             "aml_raw_results": result.get("aml_raw_results", latest.get("aml_raw_results")),
             "aml_risk_score": result.get("aml_risk_score", latest.get("aml_risk_score")),
-            "aml_status": result.get("aml_status", latest.get("aml_status", "pending")),
-            "stage": result.get("stage", latest.get("stage")),  # ← FIX: propagate stage from AML result
-            "messages": result.get("messages", latest.get("messages", [])),  # ← FIX: propagate messages
+            "aml_status": resolved_aml_status,
+            "stage": result.get("stage", latest_stage) if can_apply_aml_stage else latest_stage,
+            "messages": latest.get("messages", []) + aml_appended_messages,
             "aml_in_background": False,
-            "aml_completed": result.get("aml_status") in ("clear", "flagged"),
+            "aml_completed": resolved_aml_status in ("clear", "flagged"),
         }
 
         sessions[session_id] = _trim_messages(updated)
@@ -188,15 +213,51 @@ def _ui_step_and_label(stage: str) -> tuple[int, str]:
         "kyc_approval": (3, "KYC review"),
         "aml_screening": (3, "AML Screening"),
         "fraud_check": (4, "Fraud Check"),
-        "manual_review": (4, "Manual Review"),
+        "manual_review": (5, "Manual Review"),
+        "pending_docs": (5, "Pending Documents"),
+        "escalated": (5, "Compliance Escalation"),
+        "otp_verification": (5, "Account Activation"),
         "complete": (5, "Account Activated"),
         "rejected": (1, "Application rejected"),
     }
     return mapping.get(stage, (1, "Detail Capture"))
 
+def _save_state_to_db(state: OnboardingState, db: Session) -> None:
+    from models.customer_info import CustomerDetails
+    from datetime import datetime
+    
+    required_fields = ["full_name", "mobile_number", "email_id", "address", "occupation_type", "pan_number", "dob"]
+    for f in required_fields:
+        if not state.get(f):
+            return
+            
+    try:
+        c_dob_date = datetime.strptime(state["dob"], "%Y-%m-%d").date()
+    except Exception:
+        return
+        
+    try:
+        cust = db.query(CustomerDetails).filter(CustomerDetails.c_phone_number == state["mobile_number"]).first()
+        if not cust:
+            cust = CustomerDetails(c_phone_number=state["mobile_number"])
+            db.add(cust)
+            
+        cust.c_name = state["full_name"]
+        cust.c_account_type = state.get("account_type") or "Savings"
+        cust.c_email = state["email_id"]
+        cust.c_address = state["address"]
+        cust.c_occupation = state["occupation_type"]
+        cust.c_pan = state["pan_number"]
+        cust.c_dob = c_dob_date
+        
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Error saving to DB: {e}")
+
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     try:
         sid = request.session_id
         if sid not in sessions:
@@ -204,6 +265,103 @@ async def chat_endpoint(request: ChatRequest):
 
         state: OnboardingState = {**sessions[sid], "messages": list(sessions[sid]["messages"])}
         text = (request.user_input or "").strip()
+
+        # ── OTP verification intercept (no LLM needed) ──────────
+        if state["stage"] == "otp_verification" and text:
+            import re as _re
+            import json as _json
+            import uuid as _uuid
+            from datetime import datetime, timezone
+            from agents.decision.otp_service import (
+                verify_otp, send_confirmation_email, mask_email, is_otp_locked,
+            )
+
+            if text:
+                state["messages"].append({"role": "user", "text": text})
+
+            digits = _re.sub(r"\D", "", text)
+            otp_session_id = state.get("audit_session_id") or sid
+
+            if is_otp_locked(otp_session_id):
+                reply = "Too many incorrect attempts. Please restart the activation process or contact support."
+                state["messages"].append({"role": "assistant", "text": reply})
+                sessions[sid] = _trim_messages(state)
+                stage = state["stage"]
+                step, main_step = _ui_step_and_label(stage)
+                return ChatResponse(
+                    message=reply, progress=state["progress"],
+                    stage=stage, step=step, current_main_step=main_step,
+                    otp_required=True,
+                )
+
+            if len(digits) != 4:
+                reply = "Please enter a valid 4-digit activation code."
+                state["messages"].append({"role": "assistant", "text": reply})
+                sessions[sid] = _trim_messages(state)
+                stage = state["stage"]
+                step, main_step = _ui_step_and_label(stage)
+                return ChatResponse(
+                    message=reply, progress=state["progress"],
+                    stage=stage, step=step, current_main_step=main_step,
+                    otp_required=True,
+                )
+
+            success, msg = verify_otp(otp_session_id, digits)
+
+            if not success:
+                state["messages"].append({"role": "assistant", "text": msg})
+                sessions[sid] = _trim_messages(state)
+                stage = state["stage"]
+                step, main_step = _ui_step_and_label(stage)
+                return ChatResponse(
+                    message=msg, progress=state["progress"],
+                    stage=stage, step=step, current_main_step=main_step,
+                    otp_required=not is_otp_locked(otp_session_id),
+                )
+
+            # ── OTP Success: Activate account ──────────────────
+            account_id = f"ACC-{_uuid.uuid4().hex[:8].upper()}"
+            full_name = state.get("full_name") or "User"
+            email_id = state.get("email_id") or ""
+            account_type = state.get("account_type") or "Savings"
+            now = datetime.now(timezone.utc)
+            now_iso = now.isoformat() + "Z"
+            now_display = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            await send_confirmation_email(
+                otp_session_id, email_id, full_name, account_id, account_type, now_display,
+            )
+
+            activation_msg = _json.dumps({
+                "type": "ACCOUNT_ACTIVATED",
+                "channel": "chatbot",
+                "payload": {
+                    "message": "Congratulations! 🎉\nYour Account has been Activated!\nThank You For Banking With Us!",
+                    "status": "ACTIVE",
+                    "activatedAt": now_iso,
+                    "account": {
+                        "accountId": account_id,
+                        "accountHolderName": full_name,
+                        "accountType": account_type,
+                    },
+                },
+            })
+
+            state["stage"] = "complete"
+            state["progress"] = 100
+            state["messages"].append({"role": "assistant", "text": activation_msg})
+            sessions[sid] = _trim_messages(state)
+            _save_state_to_db(sessions[sid], db)
+
+            step, main_step = _ui_step_and_label("complete")
+            return ChatResponse(
+                message=activation_msg, progress=100,
+                stage="complete", completed=True,
+                step=step, current_main_step=main_step,
+                otp_required=False,
+            )
+
+        # ── Normal graph flow ───────────────────────────────────
         if text:
             state["messages"].append({"role": "user", "text": text})
 
@@ -213,6 +371,7 @@ async def chat_endpoint(request: ChatRequest):
         )
         sessions[sid] = _trim_messages(new_state)
         _start_aml_if_needed(sid)
+        _save_state_to_db(sessions[sid], db)
 
         latest_state = sessions[sid]
 
@@ -237,6 +396,7 @@ async def chat_endpoint(request: ChatRequest):
             fraud_risk_score=latest_state.get("fraud_risk_score"),
             fraud_signals=latest_state.get("fraud_signals", []),
             fraud_reasoning=latest_state.get("fraud_reasoning"),
+            otp_required=stage == "otp_verification",
         )
     except Exception as e:
         print(f"Error handling chat: {e}")

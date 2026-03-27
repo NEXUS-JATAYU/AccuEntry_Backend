@@ -87,6 +87,12 @@ CHOICES: dict[str, list[str]] = {
     "account_type": ["Savings", "Current", "Fixed Deposit", "Recurring Deposit"],
     "mode_of_operation": ["Self", "Either or Survivor", "Former or Survivor", "Jointly Operated"],
     "nominee_relationship": ["Spouse", "Parent", "Child", "Sibling", "Other"],
+    "nationality": ["Yes", "No"],
+    "debit_card_required": ["Yes", "No"],
+    "internet_banking": ["Yes", "No"],
+    "mobile_banking": ["Yes", "No"],
+    "sms_alerts": ["Yes", "No"],
+    "cheque_book": ["Yes", "No"],
 }
 
 

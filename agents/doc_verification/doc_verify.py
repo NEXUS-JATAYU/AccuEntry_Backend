@@ -37,7 +37,13 @@ def request_uploads_node(state: OnboardingState) -> dict[str, Any]:
 
 
 async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
-    base: dict[str, Any] = {"doc_failure_type": None}
+    base: dict[str, Any] = {
+        "doc_failure_type": None,
+        "pan_verified": bool(state.get("pan_verified")),
+        "aadhaar_verified": bool(state.get("aadhaar_verified")),
+        "face_verified": bool(state.get("face_verified")),
+        "video_kyc_status": state.get("video_kyc_status") or "pending",
+    }
     url = f"{ACCUVERIFY_URL.rstrip('/')}/kyc/status"
     try:
         client = get_http_client()
@@ -77,6 +83,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
                 "stage": "kyc_approval",
                 "progress": 55,
                 "requires_upload": False,
+                "video_kyc_status": "verified",
                 "messages": [
                     {
                         "role": "assistant",
@@ -92,12 +99,15 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
 
     if pan_failed:
         base["doc_failure_type"] = "pan"
+        base["video_kyc_status"] = "pending"
         return base
     if aadhaar_failed:
         base["doc_failure_type"] = "aadhaar"
+        base["video_kyc_status"] = "pending"
         return base
     if face_failed:
         base["doc_failure_type"] = "face"
+        base["video_kyc_status"] = "failed"
         return base
 
     base["messages"] = [
@@ -109,6 +119,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             ),
         }
     ]
+    base["video_kyc_status"] = "pending"
     return base
 
 
