@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import json
 
 from dotenv import load_dotenv
 
@@ -19,6 +20,7 @@ from core.http_client_pool import close_http_client, get_http_client
 from agents.aml.aml_screening import build_aml_graph
 import models.customer_info
 from scripts.init_aml_indices import init_aml_indices
+from core.redis_client import redis_client
 
 # Initialize DB tables
 Base.metadata.create_all(bind=engine)
@@ -42,8 +44,42 @@ sessions: dict[str, OnboardingState] = {}
 aml_tasks: dict[str, asyncio.Task] = {}
 aml_graph = build_aml_graph()
 MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "120"))
+USE_REDIS_SESSIONS = os.getenv("USE_REDIS_SESSIONS", "true").lower() in {"1", "true", "yes"}
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 
 print(f"Using AccuVerify URL: {ACCUVERIFY_URL}")
+
+
+def _session_cache_key(session_id: str) -> str:
+    return f"accuentry:session:{session_id}"
+
+
+async def _save_session_cache(session_id: str, state: OnboardingState) -> None:
+    if not USE_REDIS_SESSIONS or redis_client is None:
+        return
+    try:
+        await redis_client.set(_session_cache_key(session_id), json.dumps(state), ex=SESSION_TTL_SECONDS)
+    except Exception as exc:
+        print(f"[DEBUG][redis] save_failed sid={session_id} err={exc}")
+
+
+async def _load_session_cache(session_id: str) -> OnboardingState | None:
+    if not USE_REDIS_SESSIONS or redis_client is None:
+        return None
+    try:
+        raw = await redis_client.get(_session_cache_key(session_id))
+        if not raw:
+            return None
+        cached = json.loads(raw)
+        if not isinstance(cached, dict):
+            return None
+        # Rehydrate with defaults so missing keys from older sessions do not break flow.
+        return {**_initial_onboarding_state(session_id), **cached}
+    except Exception as exc:
+        print(f"[DEBUG][redis] load_failed sid={session_id} err={exc}")
+        return None
+
+
 def _initial_onboarding_state(session_id: str) -> OnboardingState:
     import uuid as _uuid
     return {
@@ -193,6 +229,12 @@ def _start_aml_if_needed(session_id: str) -> None:
 def _last_assistant_text(messages: list[dict]) -> str:
     for m in reversed(messages):
         if m.get("role") == "assistant":
+            if m.get("type") and isinstance(m.get("payload"), dict):
+                return json.dumps({
+                    "type": m.get("type"),
+                    "channel": m.get("channel", "chatbot"),
+                    "payload": m.get("payload"),
+                })
             return (m.get("text") or "").strip()
     return ""
 
@@ -269,11 +311,30 @@ def _save_state_to_db(state: OnboardingState, db: Session) -> None:
 async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     try:
         sid = request.session_id
+        print(f"[DEBUG][chat] incoming sid={sid} user_input={request.user_input!r}")
         if sid not in sessions:
-            sessions[sid] = _initial_onboarding_state(sid)
+            cached = await _load_session_cache(sid)
+            if cached is not None:
+                print(f"[DEBUG][chat] restored_session_from_redis sid={sid}")
+                sessions[sid] = cached
+            else:
+                print(f"[DEBUG][chat] new_session sid={sid}")
+                sessions[sid] = _initial_onboarding_state(sid)
+                await _save_session_cache(sid, sessions[sid])
 
         state: OnboardingState = {**sessions[sid], "messages": list(sessions[sid]["messages"])}
+        if not state.get("audit_session_id"):
+            import uuid as _uuid
+            state["audit_session_id"] = str(_uuid.uuid4())
+            print(f"[DEBUG][chat] audit_session_id_missing_generated sid={sid} audit={state['audit_session_id']}")
+        if not state.get("session_id"):
+            state["session_id"] = sid
+            print(f"[DEBUG][chat] session_id_missing_set sid={sid}")
         text = (request.user_input or "").strip()
+        print(
+            f"[DEBUG][chat] sid={sid} stage={state.get('stage')} "
+            f"audit={state.get('audit_session_id')} text_present={bool(text)}"
+        )
 
         # ── OTP verification intercept (no LLM needed) ──────────
         if state["stage"] == "otp_verification" and text:
@@ -282,7 +343,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             import uuid as _uuid
             from datetime import datetime, timezone
             from agents.decision.otp_service import (
-                verify_otp, send_confirmation_email, mask_email, is_otp_locked,
+                verify_otp,
+                send_confirmation_email,
+                send_otp_email,
+                generate_otp,
+                mask_email,
+                is_otp_locked,
             )
 
             if text:
@@ -290,11 +356,80 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
 
             digits = _re.sub(r"\D", "", text)
             otp_session_id = state.get("audit_session_id") or sid
+            print(
+                f"[DEBUG][otp] sid={sid} otp_session={otp_session_id} "
+                f"text={text!r} digits={digits}"
+            )
 
             if is_otp_locked(otp_session_id):
+                print(f"[DEBUG][otp] locked sid={sid} otp_session={otp_session_id}")
                 reply = "Too many incorrect attempts. Please restart the activation process or contact support."
                 state["messages"].append({"role": "assistant", "text": reply})
                 sessions[sid] = _trim_messages(state)
+                await _save_session_cache(sid, sessions[sid])
+                stage = state["stage"]
+                step, main_step = _ui_step_and_label(stage)
+                return ChatResponse(
+                    message=reply, progress=state["progress"],
+                    stage=stage, step=step, current_main_step=main_step,
+                    otp_required=True,
+                )
+
+            lowered = text.lower()
+            resend_requested = any(
+                token in lowered
+                for token in (
+                    "resend",
+                    "new code",
+                    "send again",
+                    "didn't receive",
+                    "did not receive",
+                )
+            )
+            if resend_requested:
+                print(f"[DEBUG][otp] resend_requested sid={sid} otp_session={otp_session_id}")
+                email_id = state.get("email_id") or ""
+                masked = mask_email(email_id)
+                otp_code = generate_otp(otp_session_id)
+                if otp_code is None:
+                    print(f"[DEBUG][otp] resend_rate_limited sid={sid} otp_session={otp_session_id}")
+                    resend_message = (
+                        "You have reached the OTP resend limit. "
+                        "Please wait a few minutes and try again."
+                    )
+                elif not email_id:
+                    print(f"[DEBUG][otp] resend_missing_email sid={sid}")
+                    resend_message = "We do not have a valid email on file for this application. Please contact support."
+                else:
+                    sent = await send_otp_email(otp_session_id, email_id, otp_code)
+                    if sent:
+                        print(f"[DEBUG][otp] resend_sent sid={sid} email={masked}")
+                        resend_message = (
+                            f"A new 4-digit activation code has been sent to {masked}. "
+                            "Please enter it here to activate your account."
+                        )
+                    else:
+                        print(f"[DEBUG][otp] resend_send_failed sid={sid} email={masked}")
+                        resend_message = (
+                            f"We could not send a new activation code to {masked}. "
+                            "Please try again shortly or contact support."
+                        )
+
+                reply_payload = {
+                    "type": "OTP_REQUESTED",
+                    "channel": "chatbot",
+                    "payload": {
+                        "message": resend_message,
+                        "inputType": "otp",
+                        "otpLength": 4,
+                        "expiresInMinutes": 10,
+                    },
+                }
+                reply = _json.dumps(reply_payload)
+
+                state["messages"].append({"role": "assistant", "text": reply})
+                sessions[sid] = _trim_messages(state)
+                await _save_session_cache(sid, sessions[sid])
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
@@ -304,9 +439,11 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 )
 
             if len(digits) != 4:
+                print(f"[DEBUG][otp] invalid_digits sid={sid} digits={digits}")
                 reply = "Please enter a valid 4-digit activation code."
                 state["messages"].append({"role": "assistant", "text": reply})
                 sessions[sid] = _trim_messages(state)
+                await _save_session_cache(sid, sessions[sid])
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
@@ -316,10 +453,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 )
 
             success, msg = verify_otp(otp_session_id, digits)
+            print(f"[DEBUG][otp] verify_result sid={sid} otp_session={otp_session_id} success={success} msg={msg}")
 
             if not success:
                 state["messages"].append({"role": "assistant", "text": msg})
                 sessions[sid] = _trim_messages(state)
+                await _save_session_cache(sid, sessions[sid])
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
@@ -340,6 +479,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             await send_confirmation_email(
                 otp_session_id, email_id, full_name, account_id, account_type, now_display,
             )
+            print(f"[DEBUG][otp] activation_complete sid={sid} account_id={account_id}")
 
             activation_msg = _json.dumps({
                 "type": "ACCOUNT_ACTIVATED",
@@ -360,6 +500,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             state["progress"] = 100
             state["messages"].append({"role": "assistant", "text": activation_msg})
             sessions[sid] = _trim_messages(state)
+            await _save_session_cache(sid, sessions[sid])
             _save_state_to_db(sessions[sid], db)
 
             step, main_step = _ui_step_and_label("complete")
@@ -378,7 +519,13 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             state,
             config={"recursion_limit": 50},
         )
+        print(
+            f"[DEBUG][chat] graph_done sid={sid} stage_before={state.get('stage')} "
+            f"stage_after={new_state.get('stage')} decision_action={new_state.get('decision_action')} "
+            f"fraud_score={new_state.get('fraud_risk_score')} aml_status={new_state.get('aml_status')}"
+        )
         sessions[sid] = _trim_messages(new_state)
+        await _save_session_cache(sid, sessions[sid])
         _start_aml_if_needed(sid)
         _save_state_to_db(sessions[sid], db)
 

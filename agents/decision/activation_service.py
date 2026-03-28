@@ -42,7 +42,7 @@ def _check_rate_limit(session_id: str) -> bool:
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_placeholder_key")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "fallback-secret-for-jwt-do-not-use-in-prod")
-APP_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+APP_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
 
 
 def _generate_activation_token(session_id: str, account_id: str) -> str:

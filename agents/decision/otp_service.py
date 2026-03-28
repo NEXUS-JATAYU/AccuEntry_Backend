@@ -59,17 +59,17 @@ def generate_otp(session_id: str) -> str | None:
     one_hour_ago = now - 3600
 
     existing = _otp_store.get(session_id)
+    recent_sends: list[float] = []
     if existing:
         recent_sends = [t for t in existing.send_timestamps if t > one_hour_ago]
         if len(recent_sends) >= MAX_SENDS_PER_HOUR:
             logger.warning("OTP rate limit hit for session %s", session_id)
+            print(f"[DEBUG][otp_service] rate_limit session={session_id} sends_last_hour={len(recent_sends)}")
             return None
 
     code = f"{secrets.randbelow(10000):04d}"
 
-    timestamps = []
-    if existing:
-        timestamps = [t for t in existing.send_timestamps if t > one_hour_ago]
+    timestamps = list(recent_sends)
     timestamps.append(now)
 
     _otp_store[session_id] = OTPRecord(
@@ -78,8 +78,14 @@ def generate_otp(session_id: str) -> str | None:
         send_count=len(timestamps),
         send_timestamps=timestamps,
     )
+    print(f"[DEBUG][otp_service] generated session={session_id} send_count={len(timestamps)}")
 
     return code
+
+
+def clear_otp(session_id: str) -> None:
+    """Delete OTP state for a session (used after irrecoverable send failures)."""
+    _otp_store.pop(session_id, None)
 
 
 def verify_otp(session_id: str, submitted_code: str) -> tuple[bool, str]:
@@ -88,6 +94,7 @@ def verify_otp(session_id: str, submitted_code: str) -> tuple[bool, str]:
     Returns (success: bool, message: str).
     """
     record = _otp_store.get(session_id)
+    print(f"[DEBUG][otp_service] verify_attempt session={session_id} code_len={len(submitted_code)} has_record={record is not None}")
 
     if not record:
         return False, "Invalid code. No activation code was requested for this session."
@@ -104,12 +111,14 @@ def verify_otp(session_id: str, submitted_code: str) -> tuple[bool, str]:
     if _hash_otp(submitted_code) != record.hashed_code:
         record.attempts += 1
         remaining = MAX_ATTEMPTS - record.attempts
+        print(f"[DEBUG][otp_service] verify_failed session={session_id} attempts={record.attempts} remaining={remaining}")
         if remaining <= 0:
             record.used = True
             return False, "Too many incorrect attempts. Please restart the activation process or contact support."
         return False, f"Incorrect code. You have {remaining} attempt{'s' if remaining != 1 else ''} remaining."
 
     record.used = True
+    print(f"[DEBUG][otp_service] verify_success session={session_id}")
     return True, "OTP verified successfully."
 
 
@@ -150,11 +159,17 @@ async def send_otp_email(session_id: str, email: str, otp_code: str) -> bool:
 
     success = await _dispatch_email(payload, session_id, masked)
     if success:
+        print(f"[DEBUG][otp_service] send_success session={session_id} email={masked}")
         return True
 
     logger.warning("Retrying OTP email for %s in 5s...", masked)
+    print(f"[DEBUG][otp_service] send_retry session={session_id} email={masked}")
     await asyncio.sleep(5)
-    return await _dispatch_email(payload, session_id, masked)
+    retry_success = await _dispatch_email(payload, session_id, masked)
+    if not retry_success:
+        print(f"[DEBUG][otp_service] send_failed_after_retry session={session_id} email={masked}")
+        clear_otp(session_id)
+    return retry_success
 
 
 async def send_confirmation_email(

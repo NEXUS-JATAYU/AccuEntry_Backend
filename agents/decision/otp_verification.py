@@ -104,7 +104,7 @@ def otp_verification_node(state: OnboardingState) -> dict[str, Any]:
 
     # Verify the OTP
     verified, message = verify_otp(session_id, otp_code)
-
+    logger.info(f"OTP VERIFY INPUT: {otp_code}")
     if verified:
         # Success! Account is now activated
         logger.info(
@@ -118,7 +118,7 @@ def otp_verification_node(state: OnboardingState) -> dict[str, Any]:
                 {
                     "role": "assistant",
                     "text": (
-                        "Congratulations! 🎉\n"
+                        "Congratulations! \n"
                         "Your Account has been Activated!\n"
                         "Thank You For Banking With Us!"
                     ),

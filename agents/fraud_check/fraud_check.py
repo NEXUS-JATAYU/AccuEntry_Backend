@@ -59,8 +59,8 @@ from state import OnboardingState
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_BASE_URL = "http://localhost:11434"
-FRAUD_LLM_MODEL = "gemma2:2b"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+FRAUD_LLM_MODEL = os.getenv("FRAUD_LLM_MODEL", os.getenv("OLLAMA_MODEL", "gemma2:2b"))
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -333,10 +333,13 @@ def layer4_llm_reasoning(
     state: OnboardingState,
 ) -> dict[str, Any]:
     """Call Gemma 2 2B via Ollama to synthesise signals into a risk decision."""
+    email = state.get("email_id") or state.get("email") or ""
+    phone = state.get("mobile_number") or state.get("phone")
+
     bundle: dict[str, Any] = {
         "rule_based_score": rule_score,
         "signals": signals,
-        "email_domain": (state.get("email") or "").split("@")[-1],
+        "email_domain": email.split("@")[-1] if "@" in email else None,
         "phone_country": None,
         "ip_country": state.get("ip_country"),
         "aml_status": state.get("aml_status"),
@@ -345,7 +348,6 @@ def layer4_llm_reasoning(
         "document_verified": state.get("document_verified", False),
     }
 
-    phone = state.get("phone")
     if phone:
         try:
             parsed = phonenumbers.parse(phone, None)
@@ -391,6 +393,15 @@ def layer4_llm_reasoning(
 
         return result
 
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            reason = (
+                f"Ollama model not found (HTTP 404) for '{FRAUD_LLM_MODEL}' at {OLLAMA_BASE_URL}. "
+                f"Run: ollama pull {FRAUD_LLM_MODEL}"
+            )
+        else:
+            reason = f"Ollama HTTP error {exc.code}: {exc.reason}"
+        return _fallback(reason)
     except urllib.error.URLError as exc:
         return _fallback(f"Ollama unreachable: {exc}")
     except json.JSONDecodeError as exc:

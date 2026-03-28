@@ -247,8 +247,10 @@ def _build_decision_context(state: OnboardingState) -> str:
 
 
 async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
-    session_id = state.get("audit_session_id", "unknown")
+    session_id = state.get("audit_session_id") or state.get("session_id") or "unknown"
     fraud_score = state.get("fraud_risk_score") or 0
+    aml_status = state.get("aml_status")
+    fraud_status = (state.get("fraud_status") or "").lower()
 
     logger.info(
         "decision_agent_state_check | session=%s | fraud_status=%s "
@@ -277,6 +279,10 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         "decision_agent_start: all_tool_outputs=%s",
         input_snapshot,
     )
+    print(
+        f"[DEBUG][decision] session={session_id} fraud_score={fraud_score} "
+        f"fraud_status={fraud_status} aml_status={aml_status}"
+    )
 
     # 1. Log entry
     _audit.log_event(
@@ -285,41 +291,153 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         input_data=input_snapshot,
     )
 
-    # 2. Build context
+    # 2. Deterministic rule gate to avoid low-risk regressions.
+    # Keep LLM as secondary for ambiguous cases only.
+    deterministic_result: dict[str, Any] | None = None
+    kyc_data: dict[str, Any] = state.get("kyc_data") or {}
+    source_of_funds = (kyc_data.get("source_of_funds") or state.get("source_of_funds") or "").strip().lower()
+    annual_income_raw = kyc_data.get("annual_income") or state.get("annual_income")
+    try:
+        annual_income = float(annual_income_raw) if annual_income_raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        annual_income = 0.0
+
+    if aml_status == "flagged":
+        deterministic_result = escalate_to_compliance.invoke({
+            "session_id": session_id,
+            "reason": "AML flagged; escalated to compliance.",
+            "severity": "high",
+        })
+    elif fraud_status in {"flagged", "rejected"} and fraud_score >= 60:
+        deterministic_result = reject_application.invoke({
+            "session_id": session_id,
+            "reason": "Fraud flagged with high risk score.",
+        })
+    elif source_of_funds in {"cryptocurrency", "cash"} and annual_income > 1_000_000:
+        deterministic_result = queue_for_review.invoke({
+            "session_id": session_id,
+            "reason": "High-income cash/crypto source requires manual review.",
+            "priority": "urgent",
+        })
+    elif fraud_score >= 80:
+        deterministic_result = reject_application.invoke({
+            "session_id": session_id,
+            "reason": "Fraud risk score is critical.",
+        })
+    elif fraud_score >= 60:
+        deterministic_result = queue_for_review.invoke({
+            "session_id": session_id,
+            "reason": "Fraud risk score is elevated and needs manual review.",
+            "priority": "normal",
+        })
+    elif fraud_score <= 59 and aml_status in {"clear", "checking", "pending", "pending_aml", None}:
+        deterministic_result = approve_account.invoke({
+            "session_id": session_id,
+            "reason": "Low fraud risk and no AML flag.",
+        })
+
+    if deterministic_result is not None:
+        print(
+            f"[DEBUG][decision] deterministic_action={deterministic_result.get('action')} "
+            f"stage={deterministic_result.get('stage')} session={session_id}"
+        )
+        tool_result = deterministic_result
+
+    # 3. Build context
     context_string = _build_decision_context(state)
 
-    # 3. Bind tools to LLM
+    # 4. Bind tools to LLM
     llm = AgentLLM().get_llm("decision_agent")
     llm_with_tools = llm.bind_tools(ALL_DECISION_TOOLS, tool_choice="required")
 
-    # 4. Agentic loop (max 3 iterations)
+    # 5. Agentic loop (max 3 iterations)
     messages: list = [
         SystemMessage(content=DECISION_AGENT_SYSTEM_PROMPT),
         HumanMessage(content=context_string),
     ]
 
-    tool_result: dict[str, Any] | None = None
+    if tool_result is None:
+        for _ in range(3):
+            response = await llm_with_tools.ainvoke(messages)
+            messages.append(response)
 
-    for _ in range(3):
-        response = await llm_with_tools.ainvoke(messages)
-        messages.append(response)
+            if not response.tool_calls:
+                break
 
-        if not response.tool_calls:
-            break
+            tc = response.tool_calls[0]
+            tool_name = tc.get("name", "")
+            raw_args = tc.get("args") or {}
+            if not isinstance(raw_args, dict):
+                raw_args = {}
 
-        tc = response.tool_calls[0]
-        result = _TOOL_MAP[tc["name"]].invoke(tc["args"])
-        messages.append(
-            ToolMessage(
-                content=json.dumps(result),
-                tool_call_id=tc["id"],
+            if tool_name not in _TOOL_MAP:
+                tool_result = queue_for_review.invoke({
+                    "session_id": session_id,
+                    "reason": f"Unknown tool requested by model: {tool_name}",
+                    "priority": "normal",
+                })
+                break
+
+            normalized_args: dict[str, Any] = dict(raw_args)
+            normalized_args.setdefault("session_id", session_id)
+
+            if tool_name in {
+                "approve_account",
+                "queue_for_review",
+                "reject_application",
+                "request_additional_docs",
+                "escalate_to_compliance",
+            }:
+                reason = normalized_args.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    normalized_args["reason"] = "Automated decision with incomplete rationale from model output."
+
+            if tool_name == "request_additional_docs":
+                doc_list = normalized_args.get("doc_list")
+                if not isinstance(doc_list, list) or not doc_list:
+                    normalized_args["doc_list"] = ["Identity proof document"]
+
+            if tool_name == "queue_for_review":
+                priority = normalized_args.get("priority")
+                if priority not in {"normal", "urgent"}:
+                    normalized_args["priority"] = "normal"
+
+            if tool_name == "escalate_to_compliance":
+                severity = normalized_args.get("severity")
+                if severity not in {"low", "medium", "high", "critical"}:
+                    normalized_args["severity"] = "high"
+
+            print(f"[DEBUG][decision] llm_tool={tool_name} raw_args={raw_args} session={session_id}")
+
+            try:
+                result = _TOOL_MAP[tool_name].invoke(normalized_args)
+            except Exception as exc:
+                logger.warning(
+                    "Decision tool invocation failed for %s (session %s): %s",
+                    tool_name,
+                    session_id,
+                    exc,
+                )
+                print(f"[DEBUG][decision] tool_invoke_error tool={tool_name} err={exc} session={session_id}")
+                tool_result = queue_for_review.invoke({
+                    "session_id": session_id,
+                    "reason": f"Tool invocation failed for {tool_name}: {exc}",
+                    "priority": "normal",
+                })
+                break
+
+            messages.append(
+                ToolMessage(
+                    content=json.dumps(result),
+                    tool_call_id=tc["id"],
+                )
             )
-        )
-        tool_result = result
-        break  # one tool call per decision
+            tool_result = result
+            break  # one tool call per decision
 
         # 5. Build state update from tool result
     if tool_result is None:
+        print(f"[DEBUG][decision] no_tool_result_fallback session={session_id}")
         tool_result = queue_for_review.invoke({
             "session_id": session_id,
             "reason": "LLM did not invoke any tool — routed to manual review",
@@ -327,28 +445,50 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         })
 
     if tool_result.get("action") == "approve":
-        from agents.decision.otp_service import generate_otp, send_otp_email, mask_email
+        from agents.decision.otp_service import clear_otp, generate_otp, send_otp_email, mask_email
 
         email_id = state.get("email_id") or ""
         full_name = state.get("full_name") or "User"
+        print(f"[DEBUG][decision] approve_path session={session_id} email={email_id}")
+
+        await send_activation_email(
+            session_id=session_id,
+            email=email_id,
+            full_name=full_name,
+            account_id=session_id[:8].upper(),
+            account_type=state.get("account_type", "Savings"),
+        )
 
         otp_code = generate_otp(session_id)
+        masked = mask_email(email_id)
         if otp_code is None:
-            tool_result["user_message"] = (
-                "We're having trouble sending your activation code. "
-                "Please try again later or contact support."
-            )
+            print(f"[DEBUG][decision] otp_generate_failed_or_rate_limited session={session_id}")
+            tool_result["stage"] = "otp_verification"
+            tool_result["user_message"] = {
+                "type": "OTP_REQUESTED",
+                "channel": "chatbot",
+                "payload": {
+                    "message": (
+                        "sending otp through email for activation.\n"
+                        "We're unable to send a new activation code right now due to resend limits. "
+                        "Please wait a few minutes and type 'resend code'."
+                    ),
+                    "inputType": "otp",
+                    "otpLength": 4,
+                    "expiresInMinutes": 10,
+                },
+            }
         else:
             email_sent = await send_otp_email(session_id, email_id, otp_code)
-            masked = mask_email(email_id)
 
             if email_sent:
-                import json as _json
+                print(f"[DEBUG][decision] otp_email_sent session={session_id} email={masked}")
                 otp_msg = {
                     "type": "OTP_REQUESTED",
                     "channel": "chatbot",
                     "payload": {
                         "message": (
+                            "sending otp through email for activation.\n"
                             "We've reached the final stage of setting up your account!\n"
                             f"We have sent a 4-digit Activation Code to your email {masked}.\n"
                             "Please enter the code to activate your account."
@@ -358,24 +498,64 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
                         "expiresInMinutes": 10,
                     },
                 }
-                tool_result["user_message"] = _json.dumps(otp_msg)
+                tool_result["user_message"] = otp_msg
                 tool_result["stage"] = "otp_verification"
             else:
-                tool_result["user_message"] = (
-                    "We're having trouble sending your activation code. "
-                    "Please try again or contact support."
-                )
+                print(f"[DEBUG][decision] otp_email_send_failed session={session_id} email={masked}")
+                clear_otp(session_id)
+                tool_result["stage"] = "otp_verification"
+                tool_result["user_message"] = {
+                    "type": "OTP_REQUESTED",
+                    "channel": "chatbot",
+                    "payload": {
+                        "message": (
+                            "sending otp through email for activation.\n"
+                            f"We could not deliver your activation code to {masked}. "
+                            "Please type 'resend code' to try again."
+                        ),
+                        "inputType": "otp",
+                        "otpLength": 4,
+                        "expiresInMinutes": 10,
+                    },
+                }
+
+    user_message = tool_result.get("user_message")
+    if isinstance(user_message, dict):
+        payload = user_message.get("payload") or {}
+        text_message = payload.get("message") or "Please continue with the next step."
+        messages = [
+            {
+                "role": "assistant",
+                "text": text_message,
+                "type": user_message.get("type", "GENERIC"),
+                "payload": payload,
+            }
+        ]
+    else:
+        messages = [
+            {
+                "role": "assistant",
+                "text": str(user_message or "Please continue with the next step."),
+            }
+        ]
+
+    decision_reason = tool_result.get("decision_reason") or "Decision completed"
+    decision_action = tool_result.get("action") or "queue_for_review"
+    stage = tool_result.get("stage") or "manual_review"
+    progress = int(tool_result.get("progress") or 85)
 
     update: dict[str, Any] = {
-        "stage": tool_result["stage"],
-        "decision_reason": tool_result["decision_reason"],
-        "decision_action": tool_result["action"],
-        "progress": tool_result["progress"],
+        "stage": stage,
+        "decision_reason": decision_reason,
+        "decision_action": decision_action,
+        "progress": progress,
         "admin_override": False,
-        "messages": [
-            {"role": "assistant", "text": tool_result["user_message"]}
-        ],
+        "messages": messages,
     }
+    print(
+        f"[DEBUG][decision] final_update session={session_id} stage={stage} "
+        f"action={decision_action} progress={progress}"
+    )
 
     if "pending_docs" in tool_result:
         update["pending_docs"] = tool_result["pending_docs"]
@@ -386,11 +566,11 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         agent_name="decision_agent",
         input_data=input_snapshot,
         output_data={
-            "action": tool_result["action"],
-            "reason": tool_result["decision_reason"],
+            "action": decision_action,
+            "reason": decision_reason,
         },
         risk_score=fraud_score,
-        decision=tool_result["action"],
+        decision=decision_action,
     )
 
     # 7. Log exit
@@ -398,11 +578,11 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         session_id,
         "decision_agent_complete",
         output_data={
-            "action": tool_result["action"],
-            "stage": tool_result["stage"],
-            "reason": tool_result["decision_reason"],
+            "action": decision_action,
+            "stage": stage,
+            "reason": decision_reason,
         },
-        decision=tool_result["action"],
+        decision=decision_action,
     )
 
     return update

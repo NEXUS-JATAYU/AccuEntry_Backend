@@ -56,6 +56,9 @@ def route(state: OnboardingState, completed: str | None = None) -> Any:
     the subgraph for the current stage.
     """
     stage = state["stage"]
+    sid = state.get("session_id")
+    audit = state.get("audit_session_id")
+    print(f"[DEBUG][supervisor] sid={sid} audit={audit} stage={stage} completed={completed}")
     if stage in (
         "complete",
         "rejected",
