@@ -4,6 +4,7 @@ KYC approval subgraph: calls AccuVerify agent approve-kyc endpoint.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -14,7 +15,12 @@ from langgraph.graph.state import CompiledStateGraph
 from core.http_client_pool import get_http_client
 from state import OnboardingState
 
-ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:8001").rstrip("/")
+logger = logging.getLogger(__name__)
+
+
+def _accuverify_base_url() -> str:
+    """Read at call time so .env is loaded before first graph run; match doc_verify/main defaults."""
+    return os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:9000").rstrip("/")
 
 
 async def check_node(state: OnboardingState) -> dict[str, Any]:
@@ -24,7 +30,7 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
         "aadhaar_verified": bool(state.get("aadhaar_verified")),
         "face_verified": bool(state.get("face_verified")),
     }
-    url = f"{ACCUVERIFY_URL.rstrip('/')}/agent/approve-kyc"
+    url = f"{_accuverify_base_url()}/agent/approve-kyc"
     try:
         client = get_http_client()
         resp = await client.post(
@@ -36,7 +42,8 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
         )
         resp.raise_for_status()
         body = resp.json()
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("approve-kyc request failed url=%s err=%s", url, exc)
         return {
             **base_kyc,
             "stage": "rejected",
@@ -47,6 +54,22 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
                     "text": (
                         "We could not complete KYC review with the verification service. "
                         "Please try again later."
+                    ),
+                }
+            ],
+        }
+
+    if body.get("error") == "kyc_record_not_found":
+        return {
+            **base_kyc,
+            "stage": "doc_verification",
+            "kyc_status": None,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "text": (
+                        "We have no verification record for your uploads yet. "
+                        "Please finish PAN, Aadhaar, and selfie steps, then try again."
                     ),
                 }
             ],

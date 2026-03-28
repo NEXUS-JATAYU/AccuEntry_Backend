@@ -19,6 +19,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Production: set RESEND_API_KEY in .env from https://resend.com (not re_placeholder_key).
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_placeholder_key")
 OTP_EXPIRY_SECONDS = 600  # 10 minutes
 MAX_ATTEMPTS = 3
@@ -135,13 +136,13 @@ async def send_otp_email(session_id: str, email: str, otp_code: str) -> bool:
         </div>
         <p>This code is valid for <strong>10 minutes</strong> and can only be used once.</p>
         <p style='color:gray;font-size:12px;'>
-            If you did not request this, please contact support immediately.
+            If you did not request this, please contact support at accuentry.artistmait.me.
         </p>
     </div>
     """
 
     payload = {
-        "from": "AccuEntry <no-reply@accuentry.internal>",
+        "from": "AccuEntry <no-reply@accuentry.artistmait.me>",
         "to": [email],
         "subject": "Your Account Activation Code",
         "html": html_content,
@@ -198,7 +199,7 @@ async def _dispatch_email(
 ) -> bool:
     if RESEND_API_KEY == "re_placeholder_key":
         logger.info(
-            "SIMULATED EMAIL to %s (session %s) — set RESEND_API_KEY to send real emails",
+            "SIMULATED EMAIL to %s (session %s) — set RESEND_API_KEY in .env for production sends",
             masked_email, session_id,
         )
         return True

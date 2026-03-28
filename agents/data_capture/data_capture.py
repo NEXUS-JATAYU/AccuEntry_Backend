@@ -147,6 +147,20 @@ def entry_node(state: OnboardingState) -> dict[str, Any]:
     return out
 
 
+# Yes/No fields: never send through the LLM — a paraphrase like "Yes, I am a resident"
+# fails validate_yes_no() which only accepts plain yes/no tokens.
+_SKIP_LLM_FOR_TARGETS: frozenset[str] = frozenset(
+    {
+        "nationality",
+        "debit_card_required",
+        "internet_banking",
+        "mobile_banking",
+        "sms_alerts",
+        "cheque_book",
+    }
+)
+
+
 async def capture_node(state: OnboardingState) -> dict[str, Any]:
     target = state.get("capture_target")
     if not target:
@@ -155,6 +169,9 @@ async def capture_node(state: OnboardingState) -> dict[str, Any]:
     user_text = _last_user_text(state)
     if not user_text:
         return {"capture_candidate": None}
+
+    if target in _SKIP_LLM_FOR_TARGETS:
+        return {"capture_candidate": user_text}
 
     options = CHOICES.get(target)
     options_text = f"Allowed values: {', '.join(options)}. " if options else ""

@@ -1,8 +1,8 @@
 """
 Decision Making Agent — LangGraph subgraph.
 
-Receives fraud, AML, video KYC, and risk-model signals and decides the
-next step for each account application using one of five tools:
+Receives fraud and AML signals and decides the next step for each account
+application using one of five tools:
   approve_account, queue_for_review, reject_application,
   request_additional_docs, escalate_to_compliance.
 
@@ -145,8 +145,8 @@ _TOOL_MAP: dict[str, Any] = {t.name: t for t in ALL_DECISION_TOOLS}
 
 DECISION_AGENT_SYSTEM_PROMPT = """
 You are a senior compliance officer at AccuEntry, an RBI-regulated digital
-bank. You receive the output of automated fraud, AML, video KYC, and risk
-model checks and decide the next step for each account application.
+bank. You receive the output of automated fraud and AML checks and decide
+the next step for each account application.
 
 You have exactly five tools available:
   approve_account          — use when all checks pass and risk is low
@@ -158,19 +158,41 @@ You have exactly five tools available:
   escalate_to_compliance   — use when a PEP match, sanctions hit, or
                              critical AML flag is present
 
+For every tool call, set argument session_id to the audit_session_id value
+from the Application Risk Summary (same string).
+
 Decision rules (follow strictly):
-  1. If aml_status = "flagged" → ALWAYS escalate_to_compliance, never approve
-  2. If fraud_status = "flagged" AND fraud_score >= 60 → reject_application
-  3. If fraud_score <= 59 AND aml_status = "clear" → approve_account
-  4. If fraud_score <= 59 AND aml_status in ("checking", "pending", "pending_aml")
-      → approve_account
-      (AML is still processing but fraud risk is low — safe to proceed)
-  5. If fraud_score >= 60 AND fraud_score < 80 → queue_for_review priority "normal"
-  6. If fraud_score >= 80 → reject_application
-  7. source_of_funds = "cryptocurrency" or "cash" with income > 10L
-      → queue_for_review with priority "urgent"
-  8. If any field is null or missing → assume lowest risk for that
-      field only. Do NOT escalate due to missing data alone.
+  1. If aml_status = "flagged"
+     → ALWAYS escalate_to_compliance, never approve
+
+  2. If fraud_status = "flagged" AND fraud_score >= 60
+     → reject_application
+
+  3. If fraud_score <= 59 AND aml_status = "clear"
+     → approve_account
+
+  4. If fraud_score <= 59 AND aml_status in
+     ("checking", "pending", "pending_aml", null, None)
+     → approve_account
+     (AML still processing but fraud risk is low — safe to proceed)
+
+  5. If fraud_score >= 60 AND fraud_score < 80
+     → queue_for_review with priority "normal"
+
+  6. If fraud_score >= 80
+     → reject_application
+
+  7. If source_of_funds = "cryptocurrency" or "cash"
+     AND annual_income > 1000000
+     → queue_for_review with priority "urgent"
+
+  8. If any field is null, missing, or not yet collected
+     → assume lowest risk for that field only
+     → do NOT escalate, reject, or request docs
+        due to a missing field alone
+     → request_additional_docs ONLY when a specific document
+        explicitly failed verification (OCR failure, photo
+        mismatch, PAN invalid) — never because a field is null
 
 You must call exactly ONE tool per decision. After calling the tool,
 respond ONLY with the JSON output of the tool — no additional text.
@@ -190,9 +212,9 @@ def _build_decision_context(state: OnboardingState) -> str:
         "fraud_score": fraud_score,
         "fraud_flags": (state.get("fraud_signals") or [])[:5],
         "aml_status": state.get("aml_status"),
-        # "risk_model_label": state.get("risk_model_label"),  # TODO: not yet implemented
-        # "risk_model_confidence": state.get("risk_model_confidence"),
-        # "video_kyc_status": state.get("video_kyc_status"),
+        # "risk_model_label": state.get("risk_model_label"),  # TODO: not yet implemented — risk_analysis
+        # "risk_model_confidence": state.get("risk_model_confidence"),  # TODO: not yet implemented — risk_analysis
+        # "video_kyc_status": state.get("video_kyc_status"),  # TODO: not yet implemented — video_kyc
         "source_of_funds": kyc_data.get("source_of_funds") or state.get("source_of_funds"),
         "annual_income": kyc_data.get("annual_income") or state.get("annual_income"),
         "nationality": kyc_data.get("nationality") or state.get("nationality"),
@@ -248,7 +270,7 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         "pan_verified": state.get("pan_verified"),
         "aadhaar_verified": state.get("aadhaar_verified"),
         "face_verified": state.get("face_verified"),
-        "video_kyc_status": state.get("video_kyc_status"),
+        # "video_kyc_status": state.get("video_kyc_status"),  # TODO: not yet implemented — video_kyc
     }
 
     logger.info(
@@ -467,6 +489,7 @@ def notify_review_queue(state: OnboardingState) -> dict:
             "decision_reason": state.get("decision_reason"),
         },
     )
+    # Empty merge: terminal stage and messages already set by decision_agent.
     return {}
 
 
@@ -478,6 +501,7 @@ def notify_rejection(state: OnboardingState) -> dict:
             "decision_reason": state.get("decision_reason"),
         },
     )
+    # Empty merge: terminal stage and messages already set by decision_agent.
     return {}
 
 
@@ -490,6 +514,7 @@ def notify_pending_docs(state: OnboardingState) -> dict:
             "decision_reason": state.get("decision_reason"),
         },
     )
+    # Empty merge: terminal stage and messages already set by decision_agent.
     return {}
 
 
@@ -501,6 +526,7 @@ def notify_escalation(state: OnboardingState) -> dict:
             "decision_reason": state.get("decision_reason"),
         },
     )
+    # Empty merge: terminal stage and messages already set by decision_agent.
     return {}
 
 

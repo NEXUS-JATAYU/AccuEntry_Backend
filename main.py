@@ -1,6 +1,13 @@
+import logging
 import os
 import asyncio
-from fastapi import FastAPI, Form, UploadFile, File, Depends
+
+from dotenv import load_dotenv
+
+# Load .env before any app submodule reads ACCUVERIFY_URL / DB_* / MONGO_*.
+load_dotenv()
+
+from fastapi import FastAPI, Form, UploadFile, File, Depends, HTTPException
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
 from schemas.chat import ChatRequest, ChatResponse
@@ -19,8 +26,10 @@ Base.metadata.create_all(bind=engine)
 # Initialize AML MongoDB indices
 init_aml_indices()
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
-ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:8001").rstrip("/")
+ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:9000").rstrip("/")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,9 +102,9 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "admin_override": False,
         "audit_session_id": str(_uuid.uuid4()),
         # Upstream signal fields for decision agent
-        "video_kyc_status": None,
-        "risk_model_label": None,
-        "risk_model_confidence": None,
+        "video_kyc_status": None,  # TODO: not yet implemented — video_kyc
+        "risk_model_label": None,  # TODO: not yet implemented — risk_analysis
+        "risk_model_confidence": None,  # TODO: not yet implemented — risk_analysis
         "kyc_data": None,
     }
 
@@ -403,48 +412,90 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         raise e
 
 
+async def _post_to_accuverify(
+    path: str,
+    *,
+    params: dict | None = None,
+    files: dict | None = None,
+    timeout: httpx.Timeout | None = None,
+) -> dict:
+    """Forward to AccuVerify; map connection errors to 503 instead of ASGI 500."""
+    client = get_http_client()
+    url = f"{ACCUVERIFY_URL}/{path.lstrip('/')}"
+    try:
+        resp = await client.post(url, params=params, files=files, timeout=timeout)
+    except httpx.ConnectError as exc:
+        logger.warning("AccuVerify unreachable at %s (%s)", url, exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "verified": False,
+                "error": "accuverify_unreachable",
+                "message": (
+                    f"Cannot connect to AccuVerify at {ACCUVERIFY_URL}. "
+                    "Start the Verify service, e.g.: "
+                    "cd AccuEntry_Verify && python -m uvicorn main:app --host 127.0.0.1 --port 9000"
+                ),
+            },
+        ) from exc
+    except httpx.TimeoutException as exc:
+        logger.warning("AccuVerify timeout %s", url)
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "verified": False,
+                "error": "accuverify_timeout",
+                "message": "AccuVerify did not respond in time.",
+            },
+        ) from exc
+
+    try:
+        return resp.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "verified": False,
+                "error": "bad_gateway",
+                "message": f"AccuVerify returned non-JSON (HTTP {resp.status_code}).",
+            },
+        )
+
+
 @app.post("/kyc/pan")
 async def proxy_pan(session_id: str = Form(...), file: UploadFile = File(...)):
-    client = get_http_client()
-    resp = await client.post(
-        f"{ACCUVERIFY_URL}/upload-pan",
+    return await _post_to_accuverify(
+        "upload-pan",
         params={"user_id": session_id},
         files={"file": (file.filename, await file.read(), file.content_type)},
     )
-    return resp.json()
 
 
 @app.post("/kyc/aadhaar")
 async def proxy_aadhaar(session_id: str = Form(...), file: UploadFile = File(...)):
-    client = get_http_client()
-    resp = await client.post(
-        f"{ACCUVERIFY_URL}/upload-aadhaar",
+    return await _post_to_accuverify(
+        "upload-aadhaar",
         params={"user_id": session_id},
         files={"file": (file.filename, await file.read(), file.content_type)},
     )
-    return resp.json()
 
 
 @app.post("/kyc/selfie")
 async def proxy_selfie(session_id: str = Form(...), file: UploadFile = File(...)):
-    client = get_http_client()
-    resp = await client.post(
-        f"{ACCUVERIFY_URL}/upload-selfie",
+    return await _post_to_accuverify(
+        "upload-selfie",
         params={"user_id": session_id},
         files={"file": (file.filename, await file.read(), file.content_type)},
         timeout=httpx.Timeout(60.0),
     )
-    return resp.json()
 
 
 @app.post("/kyc/approve")
 async def proxy_approve(session_id: str = Form(...)):
-    client = get_http_client()
-    resp = await client.post(
-        f"{ACCUVERIFY_URL}/agent/approve-kyc",
+    return await _post_to_accuverify(
+        "agent/approve-kyc",
         params={"user_id": session_id, "agent_id": "accuentry-bot"},
     )
-    return resp.json()
 
 
 @app.on_event("shutdown")

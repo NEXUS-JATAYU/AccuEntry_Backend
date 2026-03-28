@@ -4,6 +4,7 @@ Supervisor graph: routes onboarding flow by `stage` across five agent subgraphs.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Final
 
 from langgraph.graph import END, START, StateGraph
@@ -17,6 +18,8 @@ from agents.data_capture.data_capture import build_data_capture_graph
 from agents.decision.decision_tool import build_decision_graph
 from agents.decision.otp_verification import otp_verification_node
 from state import OnboardingState
+
+logger = logging.getLogger(__name__)
 
 STAGE_TO_NODE: Final[dict[str, str]] = {
     "data_capture": "data_capture",
@@ -56,17 +59,26 @@ def route(state: OnboardingState, completed: str | None = None) -> Any:
     if stage in (
         "complete",
         "rejected",
-        "otp_verification",
         "manual_review",
         "pending_docs",
         "escalated",
     ):
+        logger.info("supervisor_route | stage=%s → node=%s", stage, END)
         return END
     target = STAGE_TO_NODE.get(stage)
     if target is None:
+        logger.info("supervisor_route | stage=%s → node=%s", stage, END)
+        return END
+    # Critical guard: do not execute OTP handler in the same run that produced
+    # the OTP prompt. Only route to OTP handler on the next /chat turn when
+    # routing from START (completed is None).
+    if stage == "otp_verification" and completed is not None:
+        logger.info("supervisor_route | stage=%s completed=%s → node=%s", stage, completed, END)
         return END
     if completed is not None and target == completed:
+        logger.info("supervisor_route | stage=%s → node=%s", stage, END)
         return END
+    logger.info("supervisor_route | stage=%s → node=%s", stage, target)
     return target
 
 

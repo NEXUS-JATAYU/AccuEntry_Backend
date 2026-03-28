@@ -11,7 +11,7 @@ import os
 from langchain_ollama import ChatOllama
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("AGENT_LLM_MODEL", "gemma2:2b")
+DEFAULT_MODEL = os.getenv("AGENT_LLM_MODEL", "llama3.2")
 
 _AGENT_OVERRIDES: dict[str, dict] = {
     "decision_agent": {"temperature": 0.1, "model": "llama3.2"},

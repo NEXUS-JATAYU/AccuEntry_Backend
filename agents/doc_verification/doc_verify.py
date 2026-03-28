@@ -14,11 +14,12 @@ from langgraph.graph.state import CompiledStateGraph
 from core.http_client_pool import get_http_client
 from state import OnboardingState
 
-ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:8001")
+ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:9000")
 
 
 def request_uploads_node(state: OnboardingState) -> dict[str, Any]:
     if state.get("progress", 0) >= 40 and state.get("requires_upload"):
+        # No merge: upload prompt already shown; avoids duplicate assistant messages.
         return {}
     return {
         "requires_upload": True,
@@ -42,7 +43,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
         "pan_verified": bool(state.get("pan_verified")),
         "aadhaar_verified": bool(state.get("aadhaar_verified")),
         "face_verified": bool(state.get("face_verified")),
-        "video_kyc_status": state.get("video_kyc_status") or "pending",
+        # "video_kyc_status": state.get("video_kyc_status") or "pending",  # TODO: not yet implemented — video_kyc
     }
     url = f"{ACCUVERIFY_URL.rstrip('/')}/kyc/status"
     try:
@@ -83,7 +84,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
                 "stage": "kyc_approval",
                 "progress": 55,
                 "requires_upload": False,
-                "video_kyc_status": "verified",
+                # "video_kyc_status": "verified",  # TODO: not yet implemented — video_kyc
                 "messages": [
                     {
                         "role": "assistant",
@@ -99,15 +100,15 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
 
     if pan_failed:
         base["doc_failure_type"] = "pan"
-        base["video_kyc_status"] = "pending"
+        # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
         return base
     if aadhaar_failed:
         base["doc_failure_type"] = "aadhaar"
-        base["video_kyc_status"] = "pending"
+        # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
         return base
     if face_failed:
         base["doc_failure_type"] = "face"
-        base["video_kyc_status"] = "failed"
+        # base["video_kyc_status"] = "failed"  # TODO: not yet implemented — video_kyc
         return base
 
     base["messages"] = [
@@ -119,7 +120,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             ),
         }
     ]
-    base["video_kyc_status"] = "pending"
+    # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
     return base
 
 
