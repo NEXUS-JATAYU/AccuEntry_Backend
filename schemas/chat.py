@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     user_input : str
@@ -20,3 +22,22 @@ class ChatResponse(BaseModel):
     fraud_signals: list[str] = []
     fraud_reasoning: str | None = None
     otp_required: bool = False
+
+
+class SessionDetailsResponse(BaseModel):
+    session_id: str
+    stage: str
+    details: dict[str, str | None]
+
+
+class SessionDetailsUpdateRequest(BaseModel):
+    session_id: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionDetailsUpdateResponse(BaseModel):
+    session_id: str
+    stage: str
+    details: dict[str, str | None]
+    message: str
+    errors: dict[str, str] = Field(default_factory=dict)

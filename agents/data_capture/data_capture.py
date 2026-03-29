@@ -6,6 +6,7 @@ Flow per invoke: entry_node -> capture_node (LLM) -> validate_node -> END.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Optional
 
@@ -207,16 +208,35 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
 
     if target is None:
         if _first_missing(state) is None and state.get("stage") == "data_capture":
+            metadata = dict(state.get("metadata") or {})
+            already_prompted = bool(metadata.get("details_confirmation_prompted"))
+            metadata["details_confirmation_prompted"] = True
+
+            if already_prompted:
+                completion_message = "Your details are saved. Next, we will verify your documents (PAN, Aadhaar, and selfie)."
+            else:
+                completion_message = json.dumps(
+                    {
+                        "type": "DETAILS_CONFIRMATION_REQUIRED",
+                        "channel": "chatbot",
+                        "payload": {
+                            "message": "please confirm your details before proceeding for identity verification",
+                            "buttonLabel": "Edit Details",
+                        },
+                    }
+                )
+
             return {
                 "stage": "doc_verification",
                 "progress": 25,
                 "capture_candidate": None,
                 "capture_error": None,
                 "capture_target": None,
+                "metadata": metadata,
                 "messages": [
                     {
                         "role": "assistant",
-                        "text": "Your details are saved. Next, we will verify your documents (PAN, Aadhaar, and selfie).",
+                        "text": completion_message,
                     }
                 ],
             }
@@ -415,12 +435,31 @@ def _apply_success(state: OnboardingState, updates: dict[str, str]) -> dict[str,
     )
 
     if next_missing is None:
+        metadata = dict(state.get("metadata") or {})
+        already_prompted = bool(metadata.get("details_confirmation_prompted"))
+        metadata["details_confirmation_prompted"] = True
+
+        if already_prompted:
+            completion_message = "Your details are saved. Next, we will verify your documents (PAN, Aadhaar, and selfie)."
+        else:
+            completion_message = json.dumps(
+                {
+                    "type": "DETAILS_CONFIRMATION_REQUIRED",
+                    "channel": "chatbot",
+                    "payload": {
+                        "message": "PLEASE CONFIRM YOUR DETAILS",
+                        "buttonLabel": "VIEW DETAILS",
+                    },
+                }
+            )
+
         merged["stage"] = "doc_verification"
         merged["progress"] = 25
+        merged["metadata"] = metadata
         merged["messages"] = [
             {
                 "role": "assistant",
-                "text": "Your details are saved. Next, we will verify your documents (PAN, Aadhaar, and selfie).",
+                "text": completion_message,
             }
         ]
         return merged
@@ -428,6 +467,29 @@ def _apply_success(state: OnboardingState, updates: dict[str, str]) -> dict[str,
     merged["messages"] = [
         {"role": "assistant", "text": FIELD_QUESTIONS[next_missing]}
     ]
+
+    if next_missing == "mode_of_operation":
+        metadata = dict(state.get("metadata") or {})
+        if not metadata.get("details_confirmation_prompted"):
+            metadata["details_confirmation_prompted"] = True
+            merged["metadata"] = metadata
+            merged["messages"] = [
+                {"role": "assistant", "text": FIELD_QUESTIONS[next_missing]},
+                {
+                    "role": "assistant",
+                    "text": json.dumps(
+                        {
+                            "type": "DETAILS_CONFIRMATION_REQUIRED",
+                            "channel": "chatbot",
+                            "payload": {
+                                "message": "PLEASE CONFIRM YOUR DETAILS",
+                                "buttonLabel": "VIEW DETAILS",
+                            },
+                        }
+                    ),
+                },
+            ]
+
     return merged
 
 

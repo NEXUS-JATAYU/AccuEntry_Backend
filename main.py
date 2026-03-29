@@ -12,13 +12,31 @@ load_dotenv()
 from fastapi import FastAPI, Form, UploadFile, File, Depends, HTTPException
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
-from schemas.chat import ChatRequest, ChatResponse
+from schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    SessionDetailsResponse,
+    SessionDetailsUpdateRequest,
+    SessionDetailsUpdateResponse,
+)
 from supervisor import onboarding_graph
 from state import OnboardingState
 from sqlalchemy.orm import Session
 from core.database import engine, Base, get_db
 from core.http_client_pool import close_http_client, get_http_client
 from agents.aml.aml_screening import build_aml_graph
+from agents.data_capture.data_capture_validators import (
+    validate_name,
+    validate_date,
+    validate_choice,
+    validate_pan,
+    validate_yes_no,
+    validate_amount,
+    validate_mobile_number,
+    validate_email,
+    validate_id_proof_number,
+    validate_address,
+)
 from memory_manager import AgentMemoryManager
 import models.customer_info
 from scripts.init_aml_indices import init_aml_indices
@@ -51,6 +69,40 @@ USE_REDIS_SESSIONS = os.getenv("USE_REDIS_SESSIONS", "true").lower() in {"1", "t
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 HITL_TERMINAL_STAGES = {"manual_review", "pending_docs", "escalated", "rejected", "otp_verification", "complete"}
 HITL_FLAG_STAGES = {"manual_review", "pending_docs", "escalated", "rejected"}
+
+DETAILS_EDITABLE_FIELDS: tuple[str, ...] = (
+    "account_type",
+    "full_name",
+    "dob",
+    "gender",
+    "marital_status",
+    "pan_number",
+    "nationality",
+    "occupation_type",
+    "annual_income",
+    "source_of_funds",
+    "politically_exposed",
+    "mobile_number",
+    "email_id",
+    "id_proof_type",
+    "id_proof_number",
+    "address",
+    "mode_of_operation",
+)
+
+DETAILS_EDITABLE_STAGE_GUARD: set[str] = {"data_capture", "doc_verification"}
+
+DETAILS_CHOICES: dict[str, list[str]] = {
+    "gender": ["Male", "Female", "Third Gender"],
+    "marital_status": ["Married", "Unmarried", "Others"],
+    "occupation_type": ["Pvt. Sector", "Govt", "Business", "Student", "Retired", "Other"],
+    "source_of_funds": ["Salary", "Business Income", "Agriculture", "Investment", "Pension", "Others"],
+    "politically_exposed": ["Yes", "No", "Related to one"],
+    "id_proof_type": ["Passport", "Voter ID", "Driving Licence", "Aadhaar", "NREGA Job Card"],
+    "account_type": ["Savings", "Current", "Fixed Deposit", "Recurring Deposit"],
+    "mode_of_operation": ["Self", "Either or Survivor", "Former or Survivor", "Jointly Operated"],
+    "nationality": ["Yes", "No"],
+}
 
 print(f"Using AccuVerify URL: {ACCUVERIFY_URL}")
 
@@ -193,6 +245,51 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _details_payload_from_state(state: OnboardingState) -> dict[str, str | None]:
+    payload: dict[str, str | None] = {}
+    for key in DETAILS_EDITABLE_FIELDS:
+        value = state.get(key)
+        payload[key] = None if value is None else str(value)
+    return payload
+
+
+async def _ensure_session_state(session_id: str) -> OnboardingState:
+    if session_id in sessions:
+        return sessions[session_id]
+
+    cached = await _load_session_cache(session_id)
+    if cached is not None:
+        sessions[session_id] = cached
+        return sessions[session_id]
+
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _validate_details_field(field: str, value: object) -> tuple[bool, str]:
+    candidate = "" if value is None else str(value)
+
+    if field == "full_name":
+        return validate_name(candidate)
+    if field == "dob":
+        return validate_date(candidate)
+    if field in DETAILS_CHOICES:
+        return validate_choice(candidate, DETAILS_CHOICES[field], field.replace("_", " "))
+    if field == "pan_number":
+        return validate_pan(candidate)
+    if field == "annual_income":
+        return validate_amount(candidate, "annual income")
+    if field == "mobile_number":
+        return validate_mobile_number(candidate)
+    if field == "email_id":
+        return validate_email(candidate)
+    if field == "id_proof_number":
+        return validate_id_proof_number(candidate)
+    if field == "address":
+        return validate_address(candidate)
+
+    return False, f"Unsupported field: {field}"
 
 
 def _owner_initials(full_name: str | None) -> str:
@@ -436,6 +533,10 @@ def _ui_step_and_label(stage: str) -> tuple[int, str]:
 def _save_state_to_db(state: OnboardingState, db: Session) -> None:
     from models.customer_info import CustomerDetails
     from datetime import datetime
+
+    metadata = state.get("metadata") or {}
+    if not metadata.get("details_confirmation_saved"):
+        return
     
     required_fields = ["full_name", "mobile_number", "email_id", "address", "occupation_type", "pan_number", "dob"]
     for f in required_fields:
@@ -465,6 +566,97 @@ def _save_state_to_db(state: OnboardingState, db: Session) -> None:
     except Exception as e:
         db.rollback()
         print(f"Error saving to DB: {e}")
+
+
+@app.get("/session/{session_id}/details", response_model=SessionDetailsResponse)
+async def get_session_details(session_id: str):
+    state = await _ensure_session_state(session_id)
+    return SessionDetailsResponse(
+        session_id=session_id,
+        stage=state.get("stage", "data_capture"),
+        details=_details_payload_from_state(state),
+    )
+
+
+@app.put("/session/{session_id}/details", response_model=SessionDetailsUpdateResponse)
+async def update_session_details(
+    session_id: str,
+    request: SessionDetailsUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    if request.session_id != session_id:
+        raise HTTPException(status_code=400, detail="Session id mismatch")
+
+    state = await _ensure_session_state(session_id)
+    stage = state.get("stage", "data_capture")
+
+    if stage not in DETAILS_EDITABLE_STAGE_GUARD:
+        raise HTTPException(status_code=409, detail=f"Details cannot be edited in stage '{stage}'")
+
+    requested_details = request.details or {}
+    if not requested_details:
+        updated_noop: OnboardingState = {
+            **state,
+            "metadata": {
+                **(state.get("metadata") or {}),
+                "details_confirmation_saved": True,
+                "updated_at": _iso_now(),
+            },
+        }
+        sessions[session_id] = _trim_messages(updated_noop)
+        await _save_session_cache(session_id, sessions[session_id])
+        _save_state_to_db(sessions[session_id], db)
+        return SessionDetailsUpdateResponse(
+            session_id=session_id,
+            stage=stage,
+            details=_details_payload_from_state(sessions[session_id]),
+            message="Details confirmed and saved.",
+            errors={},
+        )
+
+    invalid_fields = [f for f in requested_details.keys() if f not in DETAILS_EDITABLE_FIELDS]
+    if invalid_fields:
+        raise HTTPException(status_code=400, detail=f"Unsupported fields: {', '.join(invalid_fields)}")
+
+    normalized: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    for field, value in requested_details.items():
+        ok, result = _validate_details_field(field, value)
+        if ok:
+            normalized[field] = result
+        else:
+            errors[field] = result
+
+    if errors:
+        return SessionDetailsUpdateResponse(
+            session_id=session_id,
+            stage=stage,
+            details=_details_payload_from_state(state),
+            message="Validation failed. Please correct highlighted fields.",
+            errors=errors,
+        )
+
+    updated: OnboardingState = {
+        **state,
+        **normalized,
+        "metadata": {
+            **(state.get("metadata") or {}),
+            "details_confirmation_saved": True,
+            "updated_at": _iso_now(),
+        },
+    }
+    sessions[session_id] = _trim_messages(updated)
+    await _save_session_cache(session_id, sessions[session_id])
+    _save_state_to_db(sessions[session_id], db)
+
+    return SessionDetailsUpdateResponse(
+        session_id=session_id,
+        stage=sessions[session_id].get("stage", "data_capture"),
+        details=_details_payload_from_state(sessions[session_id]),
+        message="Details updated successfully.",
+        errors={},
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
