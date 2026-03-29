@@ -43,7 +43,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
         "pan_verified": bool(state.get("pan_verified")),
         "aadhaar_verified": bool(state.get("aadhaar_verified")),
         "face_verified": bool(state.get("face_verified")),
-        # "video_kyc_status": state.get("video_kyc_status") or "pending",  # TODO: not yet implemented — video_kyc
+        "video_kyc_status": state.get("video_kyc_status") or "pending",
     }
     url = f"{ACCUVERIFY_URL.rstrip('/')}/kyc/status"
     try:
@@ -66,30 +66,32 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
     pan_v = bool(data.get("pan_verified"))
     aadhaar_v = bool(data.get("aadhaar_verified"))
     face_v = bool(data.get("face_verified"))
+    video_kyc_v = bool(data.get("video_kyc_verified"))
     pan_failed = bool(data.get("pan_failed"))
     aadhaar_failed = bool(data.get("aadhaar_failed"))
     face_failed = bool(data.get("face_failed"))
+    video_kyc_failed = bool(data.get("video_kyc_failed"))
 
     base.update(
         {
             "pan_verified": pan_v,
             "aadhaar_verified": aadhaar_v,
             "face_verified": face_v,
+            "video_kyc_status": "verified" if video_kyc_v else ("failed" if video_kyc_failed else "pending"),
         }
     )
 
-    if pan_v and aadhaar_v and face_v:
+    if pan_v and aadhaar_v and face_v and video_kyc_v:
         base.update(
             {
                 "stage": "kyc_approval",
                 "progress": 55,
                 "requires_upload": False,
-                # "video_kyc_status": "verified",  # TODO: not yet implemented — video_kyc
                 "messages": [
                     {
                         "role": "assistant",
                         "text": (
-                            "All documents verified. Your application is moving to "
+                            "Live kyc verified. Your application is moving to "
                             "KYC review."
                         ),
                     }
@@ -97,18 +99,45 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             }
         )
         return base
+        
+    if pan_v and aadhaar_v and face_v and not video_kyc_v:
+        import json
+        payload_str = json.dumps({
+            "type": "LIVE_KYC_REQUESTED", 
+            "payload": {"message": "click on this link to start live KYC video"}
+        })
+        last_msgs = state.get("messages", [])
+        already_prompted = False
+        for m in reversed(last_msgs):
+            if m.get("role") == "user":
+                break
+            if m.get("role") == "assistant" and ("LIVE_KYC_REQUESTED" in m.get("text", "")):
+                already_prompted = True
+                break
+                
+        if not already_prompted:
+            base.update({
+                "requires_upload": False,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "text": payload_str
+                    }
+                ]
+            })
+            return base
 
     if pan_failed:
         base["doc_failure_type"] = "pan"
-        # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
         return base
     if aadhaar_failed:
         base["doc_failure_type"] = "aadhaar"
-        # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
         return base
     if face_failed:
         base["doc_failure_type"] = "face"
-        # base["video_kyc_status"] = "failed"  # TODO: not yet implemented — video_kyc
+        return base
+    if video_kyc_failed:
+        base["doc_failure_type"] = "video_kyc"
         return base
 
     base["messages"] = [
@@ -120,12 +149,25 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             ),
         }
     ]
-    # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
     return base
 
 
 def failure_node(state: OnboardingState) -> dict[str, Any]:
     kind = state.get("doc_failure_type") or "pan"
+    import json
+    if kind == "video_kyc":
+        msg = json.dumps({
+            "type": "LIVE_KYC_REQUESTED",
+            "payload": {
+                "message": "Your Live KYC video could not be verified — please click on this link to start live KYC video again."
+            }
+        })
+        return {
+            "doc_failure_type": None,
+            "requires_upload": False,
+            "messages": [{"role": "assistant", "text": msg}],
+        }
+        
     texts = {
         "pan": "Your PAN could not be verified — please re-upload a clearer image.",
         "aadhaar": "Your Aadhaar could not be verified — please re-upload a clearer image.",
