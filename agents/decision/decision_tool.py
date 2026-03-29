@@ -222,7 +222,10 @@ def _build_decision_context(state: OnboardingState) -> str:
     }
 
     similar = _memory.retrieve_similar(
-        "decision_agent", query_data=context, top_k=3
+        "decision_agent",
+        query_data=context,
+        top_k=3,
+        where={"event_type": "decision_outcome"},
     )
 
     lines = ["=== Application Risk Summary ==="]
@@ -336,12 +339,14 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "reason": "Low fraud risk and no AML flag.",
         })
 
+    decision_source = "llm"
     if deterministic_result is not None:
         print(
             f"[DEBUG][decision] deterministic_action={deterministic_result.get('action')} "
             f"stage={deterministic_result.get('stage')} session={session_id}"
         )
         tool_result = deterministic_result
+        decision_source = "deterministic"
 
     # 3. Build context
     context_string = _build_decision_context(state)
@@ -445,24 +450,21 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         })
 
     if tool_result.get("action") == "approve":
-        from agents.decision.otp_service import clear_otp, generate_otp, send_otp_email, mask_email
+        from agents.decision.otp_service import (
+            clear_otp,
+            generate_otp,
+            send_otp_email,
+            mask_email,
+            otp_recently_sent,
+        )
 
         email_id = state.get("email_id") or ""
         full_name = state.get("full_name") or "User"
         print(f"[DEBUG][decision] approve_path session={session_id} email={email_id}")
 
-        await send_activation_email(
-            session_id=session_id,
-            email=email_id,
-            full_name=full_name,
-            account_id=session_id[:8].upper(),
-            account_type=state.get("account_type", "Savings"),
-        )
-
-        otp_code = generate_otp(session_id)
         masked = mask_email(email_id)
-        if otp_code is None:
-            print(f"[DEBUG][decision] otp_generate_failed_or_rate_limited session={session_id}")
+        if otp_recently_sent(session_id, window_seconds=180):
+            print(f"[DEBUG][decision] otp_already_sent_recently session={session_id} email={masked}")
             tool_result["stage"] = "otp_verification"
             tool_result["user_message"] = {
                 "type": "OTP_REQUESTED",
@@ -470,8 +472,8 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
                 "payload": {
                     "message": (
                         "sending otp through email for activation.\n"
-                        "We're unable to send a new activation code right now due to resend limits. "
-                        "Please wait a few minutes and type 'resend code'."
+                        f"A code was already sent recently to {masked}. "
+                        "Please enter it, or type 'resend code' if needed."
                     ),
                     "inputType": "otp",
                     "otpLength": 4,
@@ -479,30 +481,17 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
                 },
             }
         else:
-            email_sent = await send_otp_email(session_id, email_id, otp_code)
+            await send_activation_email(
+                session_id=session_id,
+                email=email_id,
+                full_name=full_name,
+                account_id=session_id[:8].upper(),
+                account_type=state.get("account_type", "Savings"),
+            )
 
-            if email_sent:
-                print(f"[DEBUG][decision] otp_email_sent session={session_id} email={masked}")
-                otp_msg = {
-                    "type": "OTP_REQUESTED",
-                    "channel": "chatbot",
-                    "payload": {
-                        "message": (
-                            "sending otp through email for activation.\n"
-                            "We've reached the final stage of setting up your account!\n"
-                            f"We have sent a 4-digit Activation Code to your email {masked}.\n"
-                            "Please enter the code to activate your account."
-                        ),
-                        "inputType": "otp",
-                        "otpLength": 4,
-                        "expiresInMinutes": 10,
-                    },
-                }
-                tool_result["user_message"] = otp_msg
-                tool_result["stage"] = "otp_verification"
-            else:
-                print(f"[DEBUG][decision] otp_email_send_failed session={session_id} email={masked}")
-                clear_otp(session_id)
+            otp_code = generate_otp(session_id)
+            if otp_code is None:
+                print(f"[DEBUG][decision] otp_generate_failed_or_rate_limited session={session_id}")
                 tool_result["stage"] = "otp_verification"
                 tool_result["user_message"] = {
                     "type": "OTP_REQUESTED",
@@ -510,14 +499,54 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
                     "payload": {
                         "message": (
                             "sending otp through email for activation.\n"
-                            f"We could not deliver your activation code to {masked}. "
-                            "Please type 'resend code' to try again."
+                            "We're unable to send a new activation code right now due to resend limits. "
+                            "Please wait a few minutes and type 'resend code'."
                         ),
                         "inputType": "otp",
                         "otpLength": 4,
                         "expiresInMinutes": 10,
                     },
                 }
+            else:
+                email_sent = await send_otp_email(session_id, email_id, otp_code)
+
+                if email_sent:
+                    print(f"[DEBUG][decision] otp_email_sent session={session_id} email={masked}")
+                    otp_msg = {
+                        "type": "OTP_REQUESTED",
+                        "channel": "chatbot",
+                        "payload": {
+                            "message": (
+                                "sending otp through email for activation.\n"
+                                "We've reached the final stage of setting up your account!\n"
+                                f"We have sent a 4-digit Activation Code to your email {masked}.\n"
+                                "Please enter the code to activate your account."
+                            ),
+                            "inputType": "otp",
+                            "otpLength": 4,
+                            "expiresInMinutes": 10,
+                        },
+                    }
+                    tool_result["user_message"] = otp_msg
+                    tool_result["stage"] = "otp_verification"
+                else:
+                    print(f"[DEBUG][decision] otp_email_send_failed session={session_id} email={masked}")
+                    clear_otp(session_id)
+                    tool_result["stage"] = "otp_verification"
+                    tool_result["user_message"] = {
+                        "type": "OTP_REQUESTED",
+                        "channel": "chatbot",
+                        "payload": {
+                            "message": (
+                                "sending otp through email for activation.\n"
+                                f"We could not deliver your activation code to {masked}. "
+                                "Please type 'resend code' to try again."
+                            ),
+                            "inputType": "otp",
+                            "otpLength": 4,
+                            "expiresInMinutes": 10,
+                        },
+                    }
 
     user_message = tool_result.get("user_message")
     if isinstance(user_message, dict):
@@ -564,13 +593,28 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
     _memory.store_interaction(
         session_id=session_id,
         agent_name="decision_agent",
-        input_data=input_snapshot,
+        input_data={
+            **input_snapshot,
+            "context_string": context_string,
+            "decision_source": decision_source,
+        },
         output_data={
             "action": decision_action,
             "reason": decision_reason,
+            "stage": stage,
+            "progress": progress,
         },
         risk_score=fraud_score,
         decision=decision_action,
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": state.get("stage") or "decision_agent",
+            "outcome_stage": stage,
+            "aml_status": aml_status,
+            "fraud_status": state.get("fraud_status"),
+            "decision_source": decision_source,
+        },
+        event_type="decision_outcome",
     )
 
     # 7. Log exit

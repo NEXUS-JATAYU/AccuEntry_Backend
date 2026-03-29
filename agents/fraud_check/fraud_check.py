@@ -55,9 +55,11 @@ from email_validator import EmailNotValidError, validate_email
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from memory_manager import AgentMemoryManager
 from state import OnboardingState
 
 logger = logging.getLogger(__name__)
+_memory = AgentMemoryManager()
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 FRAUD_LLM_MODEL = os.getenv("FRAUD_LLM_MODEL", os.getenv("OLLAMA_MODEL", "gemma2:2b"))
@@ -104,6 +106,53 @@ def _load_ip_blocklist() -> set[str]:
 
 
 _IP_BLOCKLIST: set[str] = _load_ip_blocklist()
+
+
+def _store_fraud_memory(
+    state: OnboardingState,
+    *,
+    l1_score: int,
+    l1_signals: list[str],
+    l2_score: int,
+    l2_signals: list[str],
+    l3_score: int,
+    l3_signals: list[str],
+    llm_result: dict[str, Any],
+    action: str,
+    outcome_stage: str,
+    fraud_status: str,
+    risk_score: int,
+) -> None:
+    session_id = state.get("audit_session_id") or state.get("session_id") or "unknown"
+    _memory.store_interaction(
+        session_id=session_id,
+        agent_name="fraud_check",
+        input_data={
+            "layer1": {"score": l1_score, "signals": l1_signals},
+            "layer2": {"score": l2_score, "signals": l2_signals},
+            "layer3": {"score": l3_score, "signals": l3_signals},
+            "combined_rule_score": l1_score + l2_score + l3_score,
+            "llm_result": llm_result,
+            "aml_status": state.get("aml_status"),
+        },
+        output_data={
+            "action": action,
+            "fraud_status": fraud_status,
+            "fraud_risk_score": risk_score,
+            "outcome_stage": outcome_stage,
+            "reasoning": llm_result.get("reasoning") or "",
+        },
+        risk_score=float(risk_score),
+        decision=action,
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": "fraud_check",
+            "outcome_stage": outcome_stage,
+            "risk_level": llm_result.get("risk_level", "unknown"),
+            "fraud_status": fraud_status,
+        },
+        event_type="fraud_outcome",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +489,20 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         risk_score = llm_result.get("risk_score", combined)
         if combined < 60:
             risk_score = combined
+        _store_fraud_memory(
+            state,
+            l1_score=l1_score,
+            l1_signals=l1_signals,
+            l2_score=l2_score,
+            l2_signals=l2_signals,
+            l3_score=l3_score,
+            l3_signals=l3_signals,
+            llm_result=llm_result,
+            action="hold_pending_aml",
+            outcome_stage="fraud_check",
+            fraud_status="pending_aml",
+            risk_score=int(risk_score),
+        )
         return {
             "stage": "fraud_check",
             "fraud_status": "pending_aml",
@@ -455,6 +518,29 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         }
 
     if aml_status == "flagged":
+        _memory.store_interaction(
+            session_id=state.get("audit_session_id") or state.get("session_id") or "unknown",
+            agent_name="fraud_check",
+            input_data={
+                "aml_status": aml_status,
+                "fraud_risk_score": state.get("fraud_risk_score") or 0,
+                "fraud_signals": state.get("fraud_signals") or [],
+            },
+            output_data={
+                "action": "reject",
+                "fraud_status": "flagged",
+                "outcome_stage": "rejected",
+            },
+            risk_score=float(state.get("fraud_risk_score") or 0),
+            decision="reject",
+            metadata={
+                "audit_session_id": state.get("audit_session_id") or state.get("session_id") or "unknown",
+                "workflow_stage": "fraud_check",
+                "outcome_stage": "rejected",
+                "fraud_status": "flagged",
+            },
+            event_type="fraud_outcome",
+        )
         return {
             "stage": "rejected",
             "fraud_status": "flagged",
@@ -505,6 +591,20 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
 
     # ── Route on LLM recommendation ─────────────────────────────────────────
     if action == "reject":
+        _store_fraud_memory(
+            state,
+            l1_score=l1_score,
+            l1_signals=l1_signals,
+            l2_score=l2_score,
+            l2_signals=l2_signals,
+            l3_score=l3_score,
+            l3_signals=l3_signals,
+            llm_result=llm_result,
+            action="reject",
+            outcome_stage="rejected",
+            fraud_status="rejected",
+            risk_score=int(risk_score),
+        )
         return {
             "stage": "rejected",
             "fraud_status": "rejected",
@@ -519,6 +619,20 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         }
 
     if action == "manual_review":
+        _store_fraud_memory(
+            state,
+            l1_score=l1_score,
+            l1_signals=l1_signals,
+            l2_score=l2_score,
+            l2_signals=l2_signals,
+            l3_score=l3_score,
+            l3_signals=l3_signals,
+            llm_result=llm_result,
+            action="manual_review",
+            outcome_stage="manual_review",
+            fraud_status="review",
+            risk_score=int(risk_score),
+        )
         return {
             "stage": "manual_review",
             "fraud_status": "review",
@@ -540,6 +654,20 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
     # action == "clear"
     # Transition to decision_agent stage so the final decision
     # agent can trigger the OTP email via the approve_account tool.
+    _store_fraud_memory(
+        state,
+        l1_score=l1_score,
+        l1_signals=l1_signals,
+        l2_score=l2_score,
+        l2_signals=l2_signals,
+        l3_score=l3_score,
+        l3_signals=l3_signals,
+        llm_result=llm_result,
+        action="clear",
+        outcome_stage="decision_agent",
+        fraud_status="clear",
+        risk_score=int(risk_score),
+    )
     return {
         "fraud_status": "clear",
         "fraud_risk_score": risk_score,

@@ -61,6 +61,10 @@ def generate_otp(session_id: str) -> str | None:
     existing = _otp_store.get(session_id)
     recent_sends: list[float] = []
     if existing:
+        # Do not auto-generate a second code while an active one is still valid.
+        if (not existing.used) and ((now - existing.created_at) <= OTP_EXPIRY_SECONDS):
+            print(f"[DEBUG][otp_service] active_code_exists session={session_id}; skip_auto_regen")
+            return None
         recent_sends = [t for t in existing.send_timestamps if t > one_hour_ago]
         if len(recent_sends) >= MAX_SENDS_PER_HOUR:
             logger.warning("OTP rate limit hit for session %s", session_id)
@@ -127,6 +131,27 @@ def is_otp_locked(session_id: str) -> bool:
     if not record:
         return False
     return record.attempts >= MAX_ATTEMPTS
+
+
+def otp_recently_sent(session_id: str, window_seconds: int = 180) -> bool:
+    """Return True if an unused, unexpired OTP was sent recently for this session."""
+    record = _otp_store.get(session_id)
+    if not record:
+        return False
+    if record.used:
+        return False
+    if time.time() - record.created_at > OTP_EXPIRY_SECONDS:
+        return False
+    if not record.send_timestamps:
+        return False
+    return (time.time() - max(record.send_timestamps)) <= max(window_seconds, 1)
+
+
+def get_otp_send_count(session_id: str) -> int:
+    record = _otp_store.get(session_id)
+    if not record:
+        return 0
+    return max(0, int(record.send_count))
 
 
 async def send_otp_email(session_id: str, email: str, otp_code: str) -> bool:

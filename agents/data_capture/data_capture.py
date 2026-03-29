@@ -14,6 +14,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from memory_manager import AgentMemoryManager
 from agents.data_capture.data_capture_validators import (
     parse_skip,
     validate_address,
@@ -28,6 +29,8 @@ from agents.data_capture.data_capture_validators import (
     validate_yes_no,
 )
 from state import OnboardingState
+
+_memory = AgentMemoryManager()
 
 FIELD_ORDER: tuple[str, ...] = (
     "account_type",
@@ -333,6 +336,30 @@ def validate_node(state: OnboardingState) -> dict[str, Any]:
 
 
 def _validation_fail(message: str, state: OnboardingState) -> dict[str, Any]:
+    session_id = state.get("audit_session_id") or state.get("session_id") or "unknown"
+    target = state.get("capture_target") or "unknown"
+    attempted_value = state.get("capture_candidate") or _last_user_text(state)
+    _memory.store_interaction(
+        session_id=session_id,
+        agent_name="data_capture",
+        input_data={
+            "field": target,
+            "attempted_value": attempted_value,
+            "user_text": _last_user_text(state),
+        },
+        output_data={
+            "status": "validation_failed",
+            "message": message,
+        },
+        decision="validation_failed",
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": state.get("stage") or "data_capture",
+            "field": target,
+        },
+        event_type="data_capture_validation_fail",
+        doc_suffix=str(target),
+    )
     return {
         "capture_error": "validation",
         "capture_candidate": None,
@@ -361,6 +388,31 @@ def _apply_success(state: OnboardingState, updates: dict[str, str]) -> dict[str,
         "capture_target": next_missing,
         "progress": progress,
     }
+
+    session_id = state.get("audit_session_id") or state.get("session_id") or "unknown"
+    _memory.store_interaction(
+        session_id=session_id,
+        agent_name="data_capture",
+        input_data={
+            "field": state.get("capture_target"),
+            "attempted_value": state.get("capture_candidate") or _last_user_text(state),
+            "updates": updates,
+        },
+        output_data={
+            "status": "accepted",
+            "next_missing": next_missing,
+            "next_stage": "doc_verification" if next_missing is None else "data_capture",
+            "progress": 25 if next_missing is None else progress,
+        },
+        decision="accepted",
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": state.get("stage") or "data_capture",
+            "field_count_updated": len(updates),
+        },
+        event_type="data_capture_field_update",
+        doc_suffix=str(state.get("capture_target") or "field"),
+    )
 
     if next_missing is None:
         merged["stage"] = "doc_verification"

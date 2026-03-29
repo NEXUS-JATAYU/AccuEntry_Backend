@@ -12,9 +12,45 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from core.http_client_pool import get_http_client
+from memory_manager import AgentMemoryManager
 from state import OnboardingState
 
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:9000")
+_memory = AgentMemoryManager()
+
+
+def _store_doc_verify_memory(
+    state: OnboardingState,
+    *,
+    status: str,
+    outcome_stage: str,
+    verify_payload: dict[str, Any],
+) -> None:
+    session_id = state.get("audit_session_id") or state.get("session_id") or "unknown"
+    _memory.store_interaction(
+        session_id=session_id,
+        agent_name="doc_verify",
+        input_data={
+            "session_id": state.get("session_id"),
+            "doc_failure_type": state.get("doc_failure_type"),
+            "pan_verified": state.get("pan_verified"),
+            "aadhaar_verified": state.get("aadhaar_verified"),
+            "face_verified": state.get("face_verified"),
+            "verify_payload": verify_payload,
+        },
+        output_data={
+            "status": status,
+            "outcome_stage": outcome_stage,
+        },
+        decision=status,
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": state.get("stage") or "doc_verification",
+            "outcome_stage": outcome_stage,
+            "doc_failure_type": state.get("doc_failure_type") or "",
+        },
+        event_type="doc_verify_outcome",
+    )
 
 
 def request_uploads_node(state: OnboardingState) -> dict[str, Any]:
@@ -52,6 +88,12 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
         resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError):
+        _store_doc_verify_memory(
+            state,
+            status="verify_service_unavailable",
+            outcome_stage=state.get("stage") or "doc_verification",
+            verify_payload={},
+        )
         base["messages"] = [
             {
                 "role": "assistant",
@@ -79,6 +121,21 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
     )
 
     if pan_v and aadhaar_v and face_v:
+        _store_doc_verify_memory(
+            state,
+            status="all_verified",
+            outcome_stage="kyc_approval",
+            verify_payload={
+                "pan_verified": pan_v,
+                "aadhaar_verified": aadhaar_v,
+                "face_verified": face_v,
+                "pan_confidence": data.get("pan_confidence"),
+                "aadhaar_confidence": data.get("aadhaar_confidence"),
+                "face_confidence": data.get("face_confidence"),
+                "mismatch_types": data.get("mismatch_types") or [],
+                "doc_quality_signals": data.get("doc_quality_signals") or [],
+            },
+        )
         base.update(
             {
                 "stage": "kyc_approval",
@@ -99,18 +156,66 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
         return base
 
     if pan_failed:
+        _store_doc_verify_memory(
+            state,
+            status="pan_failed",
+            outcome_stage="doc_verification",
+            verify_payload={
+                "pan_failed": True,
+                "pan_confidence": data.get("pan_confidence"),
+                "mismatch_types": data.get("mismatch_types") or [],
+                "doc_quality_signals": data.get("doc_quality_signals") or [],
+            },
+        )
         base["doc_failure_type"] = "pan"
         # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
         return base
     if aadhaar_failed:
+        _store_doc_verify_memory(
+            state,
+            status="aadhaar_failed",
+            outcome_stage="doc_verification",
+            verify_payload={
+                "aadhaar_failed": True,
+                "aadhaar_confidence": data.get("aadhaar_confidence"),
+                "mismatch_types": data.get("mismatch_types") or [],
+                "doc_quality_signals": data.get("doc_quality_signals") or [],
+            },
+        )
         base["doc_failure_type"] = "aadhaar"
         # base["video_kyc_status"] = "pending"  # TODO: not yet implemented — video_kyc
         return base
     if face_failed:
+        _store_doc_verify_memory(
+            state,
+            status="face_failed",
+            outcome_stage="doc_verification",
+            verify_payload={
+                "face_failed": True,
+                "face_confidence": data.get("face_confidence"),
+                "mismatch_types": data.get("mismatch_types") or [],
+                "doc_quality_signals": data.get("doc_quality_signals") or [],
+            },
+        )
         base["doc_failure_type"] = "face"
         # base["video_kyc_status"] = "failed"  # TODO: not yet implemented — video_kyc
         return base
 
+    _store_doc_verify_memory(
+        state,
+        status="verification_pending",
+        outcome_stage=state.get("stage") or "doc_verification",
+        verify_payload={
+            "pan_verified": pan_v,
+            "aadhaar_verified": aadhaar_v,
+            "face_verified": face_v,
+            "pan_confidence": data.get("pan_confidence"),
+            "aadhaar_confidence": data.get("aadhaar_confidence"),
+            "face_confidence": data.get("face_confidence"),
+            "mismatch_types": data.get("mismatch_types") or [],
+            "doc_quality_signals": data.get("doc_quality_signals") or [],
+        },
+    )
     base["messages"] = [
         {
             "role": "assistant",
@@ -135,6 +240,12 @@ def failure_node(state: OnboardingState) -> dict[str, Any]:
         ),
     }
     msg = texts.get(kind, texts["pan"])
+    _store_doc_verify_memory(
+        state,
+        status=f"retry_requested_{kind}",
+        outcome_stage="doc_verification",
+        verify_payload={"failure_kind": kind},
+    )
     return {
         "doc_failure_type": None,
         "requires_upload": True,

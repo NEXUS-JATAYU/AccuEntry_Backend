@@ -27,6 +27,8 @@ logs/audit
 # Logs
 *.log
 
+#chroma db
+.chroma
 # Testing 
 .pytest_cache/
 .coverage

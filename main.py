@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 import json
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 from core.database import engine, Base, get_db
 from core.http_client_pool import close_http_client, get_http_client
 from agents.aml.aml_screening import build_aml_graph
+from memory_manager import AgentMemoryManager
 import models.customer_info
 from scripts.init_aml_indices import init_aml_indices
 from core.redis_client import redis_client
@@ -43,11 +45,55 @@ app.add_middleware(
 sessions: dict[str, OnboardingState] = {}
 aml_tasks: dict[str, asyncio.Task] = {}
 aml_graph = build_aml_graph()
+agent_memory = AgentMemoryManager()
 MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "120"))
 USE_REDIS_SESSIONS = os.getenv("USE_REDIS_SESSIONS", "true").lower() in {"1", "true", "yes"}
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
+HITL_TERMINAL_STAGES = {"manual_review", "pending_docs", "escalated", "rejected", "otp_verification", "complete"}
+HITL_FLAG_STAGES = {"manual_review", "pending_docs", "escalated", "rejected"}
 
 print(f"Using AccuVerify URL: {ACCUVERIFY_URL}")
+
+
+def _reward_for_outcome(outcome: str, otp_no_rework: bool) -> float:
+    base = {
+        "complete": 1.0,
+        "otp_verification": 0.7,
+        "manual_review": 0.35,
+        "pending_docs": 0.25,
+        "escalated": 0.2,
+        "rejected": 0.1,
+    }.get(outcome, 0.0)
+    if otp_no_rework:
+        base += 0.15
+    return round(min(1.0, max(0.0, base)), 4)
+
+
+def _emit_decision_feedback(
+    *,
+    state: OnboardingState,
+    outcome: str,
+    otp_no_rework: bool,
+    source: str,
+) -> None:
+    session_id = state.get("audit_session_id") or state.get("session_id")
+    if not session_id:
+        return
+    reward = _reward_for_outcome(outcome, otp_no_rework=otp_no_rework)
+    agent_memory.store_feedback(
+        agent_name="decision_agent",
+        session_id=session_id,
+        outcome=outcome,
+        otp_no_rework=otp_no_rework,
+        reward_score=reward,
+        source=source,
+        metadata={
+            "workflow_stage": state.get("stage") or outcome,
+            "decision_action": state.get("decision_action") or "",
+            "aml_status": state.get("aml_status") or "",
+            "fraud_status": state.get("fraud_status") or "",
+        },
+    )
 
 
 def _session_cache_key(session_id: str) -> str:
@@ -145,6 +191,118 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
     }
 
 
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _owner_initials(full_name: str | None) -> str:
+    parts = [p for p in (full_name or "").strip().split() if p]
+    if not parts:
+        return "NA"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+
+def _hitl_status_from_stage(stage: str) -> str:
+    if stage == "rejected":
+        return "Inactive"
+    if stage in {"otp_verification", "complete"}:
+        return "Active"
+    return "Pending"
+
+
+def _hitl_compliance(stage: str) -> str:
+    if stage in HITL_FLAG_STAGES:
+        return "Non-Compliant"
+    if stage in {"otp_verification", "complete"}:
+        return "Compliant"
+    return "Pending"
+
+
+def _build_hitl_report(state: OnboardingState) -> tuple[bool, str]:
+    stage = state.get("stage") or "data_capture"
+    decision_action = state.get("decision_action") or "undecided"
+    decision_reason = state.get("decision_reason") or "No decision reason provided"
+    fraud_score = state.get("fraud_risk_score")
+    aml_status = state.get("aml_status") or "pending"
+    signals = state.get("fraud_signals") or []
+    signals_text = ", ".join(signals[:4]) if signals else "none"
+
+    if stage in HITL_FLAG_STAGES:
+        report = (
+            f"Flag raised for manual attention. Stage={stage}. Decision={decision_action}. "
+            f"Reason={decision_reason}. Fraud score={fraud_score}. AML={aml_status}. "
+            f"Signals={signals_text}."
+        )
+        return True, report
+
+    report = (
+        f"Valid onboarding flow. Stage={stage}. Decision={decision_action}. "
+        f"Reason={decision_reason}. Fraud score={fraud_score}. AML={aml_status}. "
+        "Account is progressing normally for activation."
+    )
+    return False, report
+
+
+def _build_hitl_case(session_id: str, state: OnboardingState) -> dict:
+    stage = state.get("stage") or "data_capture"
+    flagged, report = _build_hitl_report(state)
+    audit_id = state.get("audit_session_id") or session_id
+    updated_at = ((state.get("metadata") or {}).get("updated_at") or _iso_now())
+    alerts = len(state.get("fraud_signals") or []) + (1 if flagged else 0)
+    decision_action = state.get("decision_action") or "in_progress"
+
+    return {
+        "id": str(audit_id)[:12].upper(),
+        "session_id": session_id,
+        "audit_session_id": audit_id,
+        "obligation": report,
+        "status": _hitl_status_from_stage(stage),
+        "module": "Decision Engine" if stage in HITL_TERMINAL_STAGES else "Onboarding Pipeline",
+        "jurisdiction": f"AML {state.get('aml_status') or 'pending'}",
+        "alerts": alerts,
+        "compliance": _hitl_compliance(stage),
+        "owner": _owner_initials(state.get("full_name")),
+        "ownerColor": "#2563eb" if flagged else "#16a34a",
+        "due": updated_at.replace("T", " ")[:19],
+        "flagged": flagged,
+        "report": report,
+        "stage": stage,
+        "decision_action": decision_action,
+        "decision_reason": state.get("decision_reason"),
+        "fraud_risk_score": state.get("fraud_risk_score"),
+        "fraud_signals": state.get("fraud_signals") or [],
+        "aml_status": state.get("aml_status"),
+        "progress": state.get("progress", 0),
+        "updated_at": updated_at,
+        "full_name": state.get("full_name"),
+        "email_id": state.get("email_id"),
+    }
+
+
+async def _collect_all_session_states() -> dict[str, OnboardingState]:
+    merged: dict[str, OnboardingState] = dict(sessions)
+    if not USE_REDIS_SESSIONS or redis_client is None:
+        return merged
+
+    try:
+        async for key in redis_client.scan_iter(match="accuentry:session:*"):
+            sid = key.split(":")[-1]
+            if sid in merged:
+                continue
+            raw = await redis_client.get(key)
+            if not raw:
+                continue
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                merged[sid] = {**_initial_onboarding_state(sid), **parsed}
+    except Exception as exc:
+        print(f"[DEBUG][hitl] redis_collect_failed err={exc}")
+
+    return merged
+
+
 def _should_start_aml(state: OnboardingState) -> bool:
     if state.get("kyc_status") != "approved":
         return False
@@ -193,6 +351,7 @@ async def _run_aml_background(session_id: str) -> None:
             "messages": latest.get("messages", []) + aml_appended_messages,
             "aml_in_background": False,
             "aml_completed": resolved_aml_status in ("clear", "flagged"),
+            "metadata": {**(latest.get("metadata") or {}), "updated_at": _iso_now()},
         }
 
         sessions[session_id] = _trim_messages(updated)
@@ -222,6 +381,7 @@ def _start_aml_if_needed(session_id: str) -> None:
         **state,
         "aml_status": "checking",
         "aml_in_background": True,
+        "metadata": {**(state.get("metadata") or {}), "updated_at": _iso_now()},
     }
     aml_tasks[session_id] = asyncio.create_task(_run_aml_background(session_id))
 
@@ -336,6 +496,39 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             f"audit={state.get('audit_session_id')} text_present={bool(text)}"
         )
 
+        # Empty-input status polls should not re-run terminal/OTP flows.
+        if not text and state.get("stage") in {
+            "otp_verification",
+            "complete",
+            "manual_review",
+            "pending_docs",
+            "escalated",
+            "rejected",
+        }:
+            stage = state["stage"]
+            step, main_step = _ui_step_and_label(stage)
+            reply = _last_assistant_text(state.get("messages", [])) or _fallback_assistant_message(
+                stage,
+                state.get("requires_upload", False),
+            )
+            print(f"[DEBUG][chat] empty_poll_short_circuit sid={sid} stage={stage}")
+            return ChatResponse(
+                message=reply,
+                progress=state.get("progress", 0),
+                requires_upload=state.get("requires_upload", False),
+                stage=stage,
+                completed=stage == "complete",
+                step=step,
+                current_main_step=main_step,
+                aml_status=state.get("aml_status", "pending"),
+                aml_in_background=state.get("aml_in_background", False),
+                fraud_status=state.get("fraud_status"),
+                fraud_risk_score=state.get("fraud_risk_score"),
+                fraud_signals=state.get("fraud_signals", []),
+                fraud_reasoning=state.get("fraud_reasoning"),
+                otp_required=stage == "otp_verification",
+            )
+
         # ── OTP verification intercept (no LLM needed) ──────────
         if state["stage"] == "otp_verification" and text:
             import re as _re
@@ -349,6 +542,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 generate_otp,
                 mask_email,
                 is_otp_locked,
+                get_otp_send_count,
             )
 
             if text:
@@ -372,6 +566,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 return ChatResponse(
                     message=reply, progress=state["progress"],
                     stage=stage, step=step, current_main_step=main_step,
+                    aml_status=state.get("aml_status", "pending"),
+                    aml_in_background=state.get("aml_in_background", False),
+                    fraud_status=state.get("fraud_status"),
+                    fraud_risk_score=state.get("fraud_risk_score"),
+                    fraud_signals=state.get("fraud_signals", []),
+                    fraud_reasoning=state.get("fraud_reasoning"),
                     otp_required=True,
                 )
 
@@ -435,6 +635,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 return ChatResponse(
                     message=reply, progress=state["progress"],
                     stage=stage, step=step, current_main_step=main_step,
+                    aml_status=state.get("aml_status", "pending"),
+                    aml_in_background=state.get("aml_in_background", False),
+                    fraud_status=state.get("fraud_status"),
+                    fraud_risk_score=state.get("fraud_risk_score"),
+                    fraud_signals=state.get("fraud_signals", []),
+                    fraud_reasoning=state.get("fraud_reasoning"),
                     otp_required=True,
                 )
 
@@ -449,6 +655,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 return ChatResponse(
                     message=reply, progress=state["progress"],
                     stage=stage, step=step, current_main_step=main_step,
+                    aml_status=state.get("aml_status", "pending"),
+                    aml_in_background=state.get("aml_in_background", False),
+                    fraud_status=state.get("fraud_status"),
+                    fraud_risk_score=state.get("fraud_risk_score"),
+                    fraud_signals=state.get("fraud_signals", []),
+                    fraud_reasoning=state.get("fraud_reasoning"),
                     otp_required=True,
                 )
 
@@ -464,6 +676,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 return ChatResponse(
                     message=msg, progress=state["progress"],
                     stage=stage, step=step, current_main_step=main_step,
+                    aml_status=state.get("aml_status", "pending"),
+                    aml_in_background=state.get("aml_in_background", False),
+                    fraud_status=state.get("fraud_status"),
+                    fraud_risk_score=state.get("fraud_risk_score"),
+                    fraud_signals=state.get("fraud_signals", []),
+                    fraud_reasoning=state.get("fraud_reasoning"),
                     otp_required=not is_otp_locked(otp_session_id),
                 )
 
@@ -500,6 +718,14 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             state["progress"] = 100
             state["messages"].append({"role": "assistant", "text": activation_msg})
             sessions[sid] = _trim_messages(state)
+            sessions[sid]["metadata"] = {**(sessions[sid].get("metadata") or {}), "updated_at": _iso_now()}
+            otp_no_rework = get_otp_send_count(otp_session_id) <= 1
+            _emit_decision_feedback(
+                state=sessions[sid],
+                outcome="complete",
+                otp_no_rework=otp_no_rework,
+                source="otp_verification",
+            )
             await _save_session_cache(sid, sessions[sid])
             _save_state_to_db(sessions[sid], db)
 
@@ -508,6 +734,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 message=activation_msg, progress=100,
                 stage="complete", completed=True,
                 step=step, current_main_step=main_step,
+                aml_status=state.get("aml_status", "pending"),
+                aml_in_background=state.get("aml_in_background", False),
+                fraud_status=state.get("fraud_status"),
+                fraud_risk_score=state.get("fraud_risk_score"),
+                fraud_signals=state.get("fraud_signals", []),
+                fraud_reasoning=state.get("fraud_reasoning"),
                 otp_required=False,
             )
 
@@ -525,11 +757,21 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             f"fraud_score={new_state.get('fraud_risk_score')} aml_status={new_state.get('aml_status')}"
         )
         sessions[sid] = _trim_messages(new_state)
+        sessions[sid]["metadata"] = {**(sessions[sid].get("metadata") or {}), "updated_at": _iso_now()}
         await _save_session_cache(sid, sessions[sid])
         _start_aml_if_needed(sid)
         _save_state_to_db(sessions[sid], db)
 
         latest_state = sessions[sid]
+
+        terminal_outcomes = {"manual_review", "pending_docs", "escalated", "rejected"}
+        if latest_state.get("stage") in terminal_outcomes:
+            _emit_decision_feedback(
+                state=latest_state,
+                outcome=str(latest_state.get("stage")),
+                otp_no_rework=False,
+                source="workflow_terminal",
+            )
 
         stage = latest_state["stage"]
         step, main_step = _ui_step_and_label(stage)
@@ -557,6 +799,56 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error handling chat: {e}")
         raise e
+
+
+@app.get("/hitl/cases")
+async def get_hitl_cases(include_in_progress: bool = True, flagged_only: bool = False):
+    all_states = await _collect_all_session_states()
+    cases: list[dict] = []
+    for sid, state in all_states.items():
+        stage = state.get("stage") or "data_capture"
+        if not include_in_progress and stage not in HITL_TERMINAL_STAGES:
+            continue
+        case = _build_hitl_case(sid, state)
+        if flagged_only and not case["flagged"]:
+            continue
+        cases.append(case)
+
+    cases.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    return {
+        "count": len(cases),
+        "cases": cases,
+    }
+
+
+@app.get("/hitl/summary")
+async def get_hitl_summary(include_in_progress: bool = True):
+    all_states = await _collect_all_session_states()
+    rows = []
+    for sid, state in all_states.items():
+        stage = state.get("stage") or "data_capture"
+        if not include_in_progress and stage not in HITL_TERMINAL_STAGES:
+            continue
+        rows.append(_build_hitl_case(sid, state))
+
+    total = len(rows)
+    flagged = len([r for r in rows if r["flagged"]])
+    normal = len([r for r in rows if r["stage"] in {"otp_verification", "complete"}])
+    in_progress = len([r for r in rows if r["stage"] not in HITL_TERMINAL_STAGES])
+    completed = len([r for r in rows if r["stage"] == "complete"])
+    avg_risk = 0
+    risk_values = [r["fraud_risk_score"] for r in rows if isinstance(r.get("fraud_risk_score"), int)]
+    if risk_values:
+        avg_risk = round(sum(risk_values) / len(risk_values), 2)
+
+    return {
+        "total": total,
+        "flagged": flagged,
+        "normal": normal,
+        "completed": completed,
+        "in_progress": in_progress,
+        "avg_risk": avg_risk,
+    }
 
 
 async def _post_to_accuverify(
