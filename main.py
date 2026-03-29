@@ -713,6 +713,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                     },
                 },
             })
+            print(f"[DEBUG][otp] activation_msg_content={activation_msg}")
 
             state["stage"] = "complete"
             state["progress"] = 100

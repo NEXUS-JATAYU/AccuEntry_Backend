@@ -123,7 +123,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
         }
     )
 
-    if pan_v and aadhaar_v and face_v:
+    if pan_v and aadhaar_v and face_v and video_kyc_v:
         _store_doc_verify_memory(
             state,
             status="all_verified",
@@ -132,6 +132,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
                 "pan_verified": pan_v,
                 "aadhaar_verified": aadhaar_v,
                 "face_verified": face_v,
+                "video_kyc_verified": video_kyc_v,
                 "pan_confidence": data.get("pan_confidence"),
                 "aadhaar_confidence": data.get("aadhaar_confidence"),
                 "face_confidence": data.get("face_confidence"),
@@ -148,7 +149,7 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
                     {
                         "role": "assistant",
                         "text": (
-                            "Live kyc verified. Your application is moving to "
+                            "Live KYC verified. Your application is moving to "
                             "KYC review."
                         ),
                     }
@@ -156,12 +157,29 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             }
         )
         return base
-        
+
     if pan_v and aadhaar_v and face_v and not video_kyc_v:
+        _store_doc_verify_memory(
+            state,
+            status="live_kyc_required",
+            outcome_stage="doc_verification",
+            verify_payload={
+                "pan_verified": pan_v,
+                "aadhaar_verified": aadhaar_v,
+                "face_verified": face_v,
+                "video_kyc_verified": video_kyc_v,
+                "video_kyc_failed": video_kyc_failed,
+            },
+        )
         import json
         payload_str = json.dumps({
             "type": "LIVE_KYC_REQUESTED", 
-            "payload": {"message": "click on this link to start live KYC video"}
+            "payload": {
+                "message": (
+                    "Your PAN, Aadhaar, and selfie are verified.\n"
+                    "Please click the button below to start Live KYC video verification."
+                )
+            }
         })
         last_msgs = state.get("messages", [])
         already_prompted = False
@@ -174,6 +192,8 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
                 
         if not already_prompted:
             base.update({
+                "stage": "doc_verification",
+                "progress": max(int(state.get("progress", 40)), 50),
                 "requires_upload": False,
                 "messages": [
                     {
