@@ -929,6 +929,16 @@ async def proxy_selfie(session_id: str = Form(...), file: UploadFile = File(...)
     )
 
 
+@app.post("/kyc/video-kyc")
+async def proxy_video_kyc(session_id: str = Form(...), file: UploadFile = File(...)):
+    return await _post_to_accuverify(
+        "upload-video-kyc",
+        params={"user_id": session_id},
+        files={"file": (file.filename, await file.read(), file.content_type)},
+        timeout=httpx.Timeout(120.0),
+    )
+
+
 @app.post("/kyc/approve")
 async def proxy_approve(session_id: str = Form(...)):
     return await _post_to_accuverify(
