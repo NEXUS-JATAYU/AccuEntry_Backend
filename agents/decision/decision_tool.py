@@ -292,6 +292,11 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         session_id,
         "decision_agent_start",
         input_data=input_snapshot,
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": state.get("stage") or "decision_agent",
+            "decision_source": "pending",
+        },
     )
 
     # 2. Deterministic rule gate to avoid low-risk regressions.
@@ -627,6 +632,14 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "reason": decision_reason,
         },
         decision=decision_action,
+        metadata={
+            "audit_session_id": state.get("audit_session_id") or session_id,
+            "workflow_stage": state.get("stage") or "decision_agent",
+            "outcome_stage": stage,
+            "decision_source": decision_source,
+            "aml_status": aml_status,
+            "fraud_status": state.get("fraud_status"),
+        },
     )
 
     return update
@@ -642,7 +655,12 @@ async def decision_agent_node(state: OnboardingState) -> dict[str, Any]:
         _audit.log_event(
             session_id,
             "decision_agent_error",
-            metadata={"error": "Timeout after 15 seconds"},
+            metadata={
+                "error": "Timeout after 15 seconds",
+                "audit_session_id": state.get("audit_session_id") or session_id,
+                "workflow_stage": state.get("stage") or "decision_agent",
+                "decision_source": "llm",
+            },
         )
         return {
             "stage": "manual_review",
@@ -666,7 +684,12 @@ async def decision_agent_node(state: OnboardingState) -> dict[str, Any]:
         _audit.log_event(
             session_id,
             "decision_agent_error",
-            metadata={"error": str(exc)},
+            metadata={
+                "error": str(exc),
+                "audit_session_id": state.get("audit_session_id") or session_id,
+                "workflow_stage": state.get("stage") or "decision_agent",
+                "decision_source": "llm",
+            },
         )
         return {
             "stage": "manual_review",

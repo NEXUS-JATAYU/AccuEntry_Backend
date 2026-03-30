@@ -3,8 +3,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
-    user_input : str
-    session_id: str
+    user_input: str = ""
+    session_id: str | None = None
 
 class ChatResponse(BaseModel):
     message: str

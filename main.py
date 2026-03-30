@@ -2,7 +2,10 @@ import logging
 import os
 import asyncio
 import json
+import uuid
+import hashlib
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -12,6 +15,7 @@ load_dotenv()
 from fastapi import FastAPI, Form, UploadFile, File, Depends, HTTPException
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.messages import HumanMessage, SystemMessage
 from schemas.chat import (
     ChatRequest,
     ChatResponse,
@@ -39,6 +43,7 @@ from agents.data_capture.data_capture_validators import (
 )
 from memory_manager import AgentMemoryManager
 import models.customer_info
+import models.compliance_logs
 from scripts.init_aml_indices import init_aml_indices
 from core.redis_client import redis_client
 
@@ -401,7 +406,13 @@ async def _collect_all_session_states() -> dict[str, OnboardingState]:
 
 
 def _should_start_aml(state: OnboardingState) -> bool:
-    if state.get("kyc_status") != "approved":
+    stage = state.get("stage") or ""
+    kyc_approved = state.get("kyc_status") == "approved"
+    metadata = state.get("metadata") or {}
+    # Some flows can reach fraud_check with kyc_status not persisted; allow AML start there.
+    if not kyc_approved and stage not in {"fraud_check", "aml_screening"}:
+        return False
+    if metadata.get("aml_run_started"):
         return False
     if state.get("aml_completed"):
         return False
@@ -459,6 +470,14 @@ async def _run_aml_background(session_id: str) -> None:
                 **latest,
                 "aml_in_background": False,
                 "aml_status": "pending",
+                "stage": "manual_review",
+                "messages": (latest.get("messages") or []) + [
+                    {
+                        "role": "assistant",
+                        "text": "We encountered an issue while running AML screening. Your application has been routed for manual review.",
+                    }
+                ],
+                "metadata": {**(latest.get("metadata") or {}), "updated_at": _iso_now()},
             })
         print(f"Background AML task failed for {session_id}: {exc}")
     finally:
@@ -478,7 +497,12 @@ def _start_aml_if_needed(session_id: str) -> None:
         **state,
         "aml_status": "checking",
         "aml_in_background": True,
-        "metadata": {**(state.get("metadata") or {}), "updated_at": _iso_now()},
+        "metadata": {
+            **(state.get("metadata") or {}),
+            "updated_at": _iso_now(),
+            "aml_run_started": True,
+            "aml_started_at": _iso_now(),
+        },
     }
     aml_tasks[session_id] = asyncio.create_task(_run_aml_background(session_id))
 
@@ -526,7 +550,7 @@ def _ui_step_and_label(stage: str) -> tuple[int, str]:
         "escalated": (5, "Compliance Escalation"),
         "otp_verification": (5, "Account Activation"),
         "complete": (5, "Account Activated"),
-        "rejected": (1, "Application rejected"),
+        "rejected": (5, "Application rejected"),
     }
     return mapping.get(stage, (1, "Detail Capture"))
 
@@ -568,6 +592,194 @@ def _save_state_to_db(state: OnboardingState, db: Session) -> None:
         print(f"Error saving to DB: {e}")
 
 
+def _upsert_account_type_capture(state: OnboardingState, db: Session) -> None:
+    from models.compliance_logs import AccountTypeCapture
+
+    session_id = state.get("session_id")
+    if not session_id:
+        return
+
+    try:
+        row = db.query(AccountTypeCapture).filter(AccountTypeCapture.session_id == session_id).first()
+        if not row:
+            row = AccountTypeCapture(session_id=session_id)
+            db.add(row)
+
+        row.account_type = str(state.get("account_type") or row.account_type or "Unknown")
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"Error upserting account_type_capture for {session_id}: {exc}")
+
+
+def _upsert_compliance_stage_alert(state: OnboardingState, db: Session) -> None:
+    from models.compliance_logs import ComplianceStageAlert
+
+    session_id = state.get("session_id")
+    if not session_id:
+        return
+
+    stage = state.get("stage") or "data_capture"
+    flagged, report = _build_hitl_report(state)
+    signals = state.get("fraud_signals") or []
+    alert_count = len(signals) + (1 if flagged else 0)
+
+    alert_details = {
+        "fraud_signals": signals,
+        "decision_action": state.get("decision_action"),
+        "decision_reason": state.get("decision_reason"),
+        "fraud_risk_score": state.get("fraud_risk_score"),
+        "aml_status": state.get("aml_status"),
+    }
+
+    try:
+        row = (
+            db.query(ComplianceStageAlert)
+            .filter(
+                ComplianceStageAlert.session_id == session_id,
+                ComplianceStageAlert.stage == stage,
+            )
+            .first()
+        )
+        if not row:
+            row = ComplianceStageAlert(session_id=session_id, stage=stage)
+            db.add(row)
+
+        row.audit_session_id = str(state.get("audit_session_id")) if state.get("audit_session_id") else None
+        row.alert_count = alert_count
+        row.alert_summary = report
+        row.alert_details_json = alert_details
+        row.overall_flagged = flagged
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"Error upserting compliance stage alert for {session_id}: {exc}")
+
+
+def _persist_session_tracking(state: OnboardingState, db: Session) -> None:
+    _upsert_account_type_capture(state, db)
+    _upsert_compliance_stage_alert(state, db)
+    _upsert_llm_decision_summary_log(state, db)
+
+
+def _generate_llm_decision_summary(state: OnboardingState) -> tuple[str, bool]:
+    stage = state.get("stage") or "data_capture"
+    decision_action = state.get("decision_action") or "undecided"
+    decision_reason = state.get("decision_reason") or "No reason was provided"
+    fraud_score = state.get("fraud_risk_score")
+    aml_status = state.get("aml_status") or "pending"
+    fraud_signals = state.get("fraud_signals") or []
+
+    fallback = (
+        f"- Stage: {stage}\n"
+        f"- Decision: {decision_action}\n"
+        f"- Reason: {decision_reason}\n"
+        f"- Risk snapshot: fraud_score={fraud_score}, aml_status={aml_status}, signals={', '.join(fraud_signals[:4]) or 'none'}"
+    )
+
+    try:
+        from llm_config import AgentLLM
+
+        payload = {
+            "stage": stage,
+            "decision_action": decision_action,
+            "decision_reason": decision_reason,
+            "fraud_score": fraud_score,
+            "aml_status": aml_status,
+            "fraud_signals": fraud_signals,
+        }
+        llm = AgentLLM().get_llm("decision_agent")
+        response = llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You are writing customer-friendly compliance audit notes. "
+                        "Return exactly 3-5 concise bullet points, each prefixed with '-'. "
+                        "Do not invent details. Keep it factual and readable for operations teams."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        "Convert this decision event into human-readable bullet points:\n"
+                        f"{json.dumps(payload, default=str)}"
+                    )
+                ),
+            ]
+        )
+        text = str(getattr(response, "content", "") or "").strip()
+        if not text:
+            return fallback, False
+        return text, True
+    except Exception as exc:
+        print(f"[DEBUG][decision_log] llm_generation_failed err={exc}")
+        return fallback, False
+
+
+def _upsert_llm_decision_summary_log(state: OnboardingState, db: Session) -> None:
+    from models.compliance_logs import LLMDecisionLog
+
+    log_session_id = state.get("audit_session_id") or state.get("session_id")
+    session_id = state.get("session_id")
+    if not log_session_id or not session_id:
+        return
+
+    stage = state.get("stage") or "data_capture"
+    decision_action = state.get("decision_action") or "undecided"
+    decision_reason = state.get("decision_reason") or "No reason was provided"
+
+    try:
+        existing = (
+            db.query(LLMDecisionLog)
+            .filter(
+                LLMDecisionLog.session_id == str(log_session_id),
+                LLMDecisionLog.event_type == "decision_summary",
+                LLMDecisionLog.stage == stage,
+                LLMDecisionLog.decision == decision_action,
+            )
+            .first()
+        )
+        if existing:
+            return
+
+        friendly_text, used_llm = _generate_llm_decision_summary(state)
+        hash_payload = f"{log_session_id}|{stage}|decision_summary|{friendly_text.strip().lower()}"
+        log_hash = hashlib.sha256(hash_payload.encode("utf-8")).hexdigest()
+
+        db.add(
+            LLMDecisionLog(
+                session_id=str(log_session_id),
+                audit_session_id=str(log_session_id),
+                stage=stage,
+                event_type="decision_summary",
+                decision_source="llm" if used_llm else "fallback",
+                decision=decision_action,
+                friendly_text=friendly_text,
+                log_hash=log_hash,
+                input_payload_json={
+                    "fraud_score": state.get("fraud_risk_score"),
+                    "aml_status": state.get("aml_status"),
+                    "fraud_signals": state.get("fraud_signals") or [],
+                },
+                output_payload_json={
+                    "action": decision_action,
+                    "reason": decision_reason,
+                    "stage": stage,
+                },
+                metadata_json={
+                    "source_session_id": session_id,
+                    "audit_session_id": state.get("audit_session_id"),
+                    "decision_reason": decision_reason,
+                },
+            )
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"Error upserting LLM decision summary log for {log_session_id}: {exc}")
+
+
 @app.get("/session/{session_id}/details", response_model=SessionDetailsResponse)
 async def get_session_details(session_id: str):
     state = await _ensure_session_state(session_id)
@@ -606,6 +818,7 @@ async def update_session_details(
         sessions[session_id] = _trim_messages(updated_noop)
         await _save_session_cache(session_id, sessions[session_id])
         _save_state_to_db(sessions[session_id], db)
+        _persist_session_tracking(sessions[session_id], db)
         return SessionDetailsUpdateResponse(
             session_id=session_id,
             stage=stage,
@@ -649,6 +862,7 @@ async def update_session_details(
     sessions[session_id] = _trim_messages(updated)
     await _save_session_cache(session_id, sessions[session_id])
     _save_state_to_db(sessions[session_id], db)
+    _persist_session_tracking(sessions[session_id], db)
 
     return SessionDetailsUpdateResponse(
         session_id=session_id,
@@ -662,7 +876,7 @@ async def update_session_details(
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     try:
-        sid = request.session_id
+        sid = (request.session_id or "").strip() or str(uuid.uuid4())
         print(f"[DEBUG][chat] incoming sid={sid} user_input={request.user_input!r}")
         if sid not in sessions:
             cached = await _load_session_cache(sid)
@@ -682,6 +896,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         if not state.get("session_id"):
             state["session_id"] = sid
             print(f"[DEBUG][chat] session_id_missing_set sid={sid}")
+        _persist_session_tracking(state, db)
         text = (request.user_input or "").strip()
         print(
             f"[DEBUG][chat] sid={sid} stage={state.get('stage')} "
@@ -699,6 +914,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         }:
             stage = state["stage"]
             step, main_step = _ui_step_and_label(stage)
+            effective_progress = 100 if stage in {"complete", "rejected"} else state.get("progress", 0)
             reply = _last_assistant_text(state.get("messages", [])) or _fallback_assistant_message(
                 stage,
                 state.get("requires_upload", False),
@@ -706,7 +922,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             print(f"[DEBUG][chat] empty_poll_short_circuit sid={sid} stage={stage}")
             return ChatResponse(
                 message=reply,
-                progress=state.get("progress", 0),
+                progress=effective_progress,
                 requires_upload=state.get("requires_upload", False),
                 stage=stage,
                 completed=stage == "complete",
@@ -921,6 +1137,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             )
             await _save_session_cache(sid, sessions[sid])
             _save_state_to_db(sessions[sid], db)
+            _persist_session_tracking(sessions[sid], db)
 
             step, main_step = _ui_step_and_label("complete")
             return ChatResponse(
@@ -950,10 +1167,13 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             f"fraud_score={new_state.get('fraud_risk_score')} aml_status={new_state.get('aml_status')}"
         )
         sessions[sid] = _trim_messages(new_state)
+        if sessions[sid].get("stage") in {"complete", "rejected"}:
+            sessions[sid]["progress"] = 100
         sessions[sid]["metadata"] = {**(sessions[sid].get("metadata") or {}), "updated_at": _iso_now()}
         await _save_session_cache(sid, sessions[sid])
         _start_aml_if_needed(sid)
         _save_state_to_db(sessions[sid], db)
+        _persist_session_tracking(sessions[sid], db)
 
         latest_state = sessions[sid]
 
@@ -968,6 +1188,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
 
         stage = latest_state["stage"]
         step, main_step = _ui_step_and_label(stage)
+        effective_progress = 100 if stage in {"complete", "rejected"} else latest_state["progress"]
         raw_reply = _last_assistant_text(latest_state["messages"])
         reply = raw_reply or _fallback_assistant_message(
             stage,
@@ -975,7 +1196,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         )
         return ChatResponse(
             message=reply,
-            progress=latest_state["progress"],
+            progress=effective_progress,
             requires_upload=latest_state["requires_upload"],
             stage=stage,
             completed=stage == "complete",
@@ -1041,6 +1262,197 @@ async def get_hitl_summary(include_in_progress: bool = True):
         "completed": completed,
         "in_progress": in_progress,
         "avg_risk": avg_risk,
+    }
+
+
+@app.get("/hitl/cases/{session_id}/details")
+async def get_hitl_case_details(session_id: str, db: Session = Depends(get_db)):
+    from models.compliance_logs import ComplianceStageAlert, LLMDecisionLog
+    from audit_logger import AuditLogger
+
+    state = await _ensure_session_state(session_id)
+    case = _build_hitl_case(session_id, state)
+
+    alert_rows = (
+        db.query(ComplianceStageAlert)
+        .filter(ComplianceStageAlert.session_id == session_id)
+        .order_by(ComplianceStageAlert.created_at.asc())
+        .all()
+    )
+
+    alerts = [
+        {
+            "stage": row.stage,
+            "alert_count": int(row.alert_count or 0),
+            "alert_summary": row.alert_summary,
+            "alert_details": row.alert_details_json or {},
+            "overall_flagged": bool(row.overall_flagged),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+        for row in alert_rows
+    ]
+
+    if not alerts:
+        alerts.append(
+            {
+                "stage": case.get("stage"),
+                "alert_count": int(case.get("alerts") or 0),
+                "alert_summary": case.get("report") or case.get("obligation"),
+                "alert_details": {
+                    "fraud_signals": case.get("fraud_signals") or [],
+                    "decision_action": case.get("decision_action"),
+                    "decision_reason": case.get("decision_reason"),
+                },
+                "overall_flagged": bool(case.get("flagged")),
+                "created_at": case.get("updated_at"),
+                "updated_at": case.get("updated_at"),
+            }
+        )
+
+    audit_session_id = str(case.get("audit_session_id") or "")
+
+    audit_rows = (
+        db.query(LLMDecisionLog)
+        .filter(
+            (LLMDecisionLog.session_id == session_id)
+            | (LLMDecisionLog.session_id == audit_session_id)
+            | (LLMDecisionLog.audit_session_id == audit_session_id)
+        )
+        .order_by(LLMDecisionLog.created_at.asc())
+        .all()
+    )
+
+    if not audit_rows:
+        _upsert_llm_decision_summary_log(state, db)
+        audit_rows = (
+            db.query(LLMDecisionLog)
+            .filter(
+                (LLMDecisionLog.session_id == session_id)
+                | (LLMDecisionLog.session_id == audit_session_id)
+                | (LLMDecisionLog.audit_session_id == audit_session_id)
+            )
+            .order_by(LLMDecisionLog.created_at.asc())
+            .all()
+        )
+
+    if not audit_rows and audit_session_id:
+        log_dir = Path(os.getenv("AUDIT_LOG_DIR", "logs/audit"))
+        safe_audit = "".join(c for c in audit_session_id if c.isalnum() or c == "-")
+        log_file = log_dir / f"{safe_audit}.jsonl"
+        if log_file.exists():
+            backfill_logger = AuditLogger(log_dir=log_dir)
+            try:
+                with open(log_file, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        event = json.loads(line)
+                        meta = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+                        meta.setdefault("audit_session_id", audit_session_id)
+                        backfill_logger._write_db_log(
+                            session_id=event.get("session_id") or audit_session_id,
+                            event_type=event.get("event_type") or "unknown_event",
+                            input_data=event.get("input_data") if isinstance(event.get("input_data"), dict) else None,
+                            output_data=event.get("output_data") if isinstance(event.get("output_data"), dict) else None,
+                            decision=event.get("decision"),
+                            metadata=meta,
+                        )
+            except Exception as exc:
+                print(f"[DEBUG][hitl] audit_backfill_failed sid={session_id} err={exc}")
+
+            audit_rows = (
+                db.query(LLMDecisionLog)
+                .filter(
+                    (LLMDecisionLog.session_id == session_id)
+                    | (LLMDecisionLog.session_id == audit_session_id)
+                    | (LLMDecisionLog.audit_session_id == audit_session_id)
+                )
+                .order_by(LLMDecisionLog.created_at.asc())
+                .all()
+            )
+
+    audit_logs = [
+        {
+            "id": row.id,
+            "stage": row.stage,
+            "event_type": row.event_type,
+            "decision_source": row.decision_source,
+            "decision": row.decision,
+            "friendly_text": row.friendly_text,
+            "log_hash": row.log_hash,
+            "input_payload": row.input_payload_json,
+            "output_payload": row.output_payload_json,
+            "metadata": row.metadata_json,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in audit_rows
+    ]
+
+    overall_alerts = sum(item["alert_count"] for item in alerts)
+    total_flagged_stages = len([item for item in alerts if item["overall_flagged"]])
+
+    aml_raw = state.get("aml_raw_results") or {}
+    aml_checks: list[dict] = []
+
+    rbi = aml_raw.get("rbi") or {}
+    if rbi:
+        aml_checks.append(
+            {
+                "check": "RBI Caution List",
+                "status": "hit" if rbi.get("hit") else "clear",
+                "detail": rbi.get("reason") or "No caution match",
+                "important": bool(rbi.get("hit")),
+            }
+        )
+
+    ofac = aml_raw.get("ofac") or {}
+    if ofac:
+        aml_checks.append(
+            {
+                "check": "OFAC Sanctions",
+                "status": "hit" if ofac.get("hit") else ("near_miss" if ofac.get("near_miss") else "clear"),
+                "detail": (
+                    f"{ofac.get('matched_name') or 'No match'}"
+                    + (f" (score {ofac.get('match_score')})" if ofac.get("match_score") is not None else "")
+                ),
+                "important": bool(ofac.get("hit") or ofac.get("near_miss")),
+            }
+        )
+
+    pep = aml_raw.get("pep") or {}
+    if pep:
+        aml_checks.append(
+            {
+                "check": "PEP Screening",
+                "status": "hit" if pep.get("hit") else ("near_miss" if pep.get("near_miss") else "clear"),
+                "detail": pep.get("position") or pep.get("matched_name") or "No PEP match",
+                "important": bool(pep.get("hit") or pep.get("near_miss")),
+            }
+        )
+
+    rules = (aml_raw.get("rules") or {}).get("triggered_rules") or []
+    if rules:
+        aml_checks.append(
+            {
+                "check": "Risk Rules",
+                "status": "triggered",
+                "detail": ", ".join(str(rule.get("rule_id")) for rule in rules),
+                "important": True,
+            }
+        )
+
+    return {
+        "case": case,
+        "alerts_by_stage": alerts,
+        "overall": {
+            "total_alerts": overall_alerts,
+            "flagged_stages": total_flagged_stages,
+            "total_stages": len(alerts),
+        },
+        "audit_logs": audit_logs,
+        "aml_checks": aml_checks,
     }
 
 

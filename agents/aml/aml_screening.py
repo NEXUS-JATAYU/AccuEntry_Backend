@@ -1,6 +1,5 @@
 import asyncio
 from typing import Any
-from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, END
 from state import OnboardingState
 from memory_manager import AgentMemoryManager
@@ -12,7 +11,6 @@ from agents.aml.tools import (
 )
 from agents.aml.aml_scoring import compute_risk_score, route_by_score
 
-llm = ChatOllama(model="gemma2:2b", max_tokens=256)
 _memory = AgentMemoryManager()
 
 
@@ -57,12 +55,12 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
     """
     loop = asyncio.get_event_loop()
 
-    rbi_task  = loop.run_in_executor(None, check_rbi_caution_list,
-                                     state["pan_number"])
-    ofac_task = loop.run_in_executor(None, check_ofac_sanctions,
-                                     state["full_name"])
-    pep_task  = loop.run_in_executor(None, check_pep_list,
-                                     state["full_name"])
+    pan_number = state.get("pan_number") or ""
+    full_name = state.get("full_name") or ""
+
+    rbi_task = loop.run_in_executor(None, check_rbi_caution_list, pan_number)
+    ofac_task = loop.run_in_executor(None, check_ofac_sanctions, full_name)
+    pep_task = loop.run_in_executor(None, check_pep_list, full_name)
 
     # Wait for all three checks to complete
     rbi, ofac, pep = await asyncio.gather(
@@ -71,7 +69,7 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
 
     # Now run rules once with real scores from OFAC/PEP
     rules = evaluate_risk_rules(
-        state["full_name"],
+        state.get("full_name") or "",
         state.get("dob"),
         state.get("account_type", ""),
         ofac_match_score=ofac.get("match_score", 0),
@@ -133,12 +131,10 @@ def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
         "aml_status": "flagged",
         "aml_risk_score": int(state.get("aml_risk_score") or 0),
         "stage": "rejected",
-        "progress": state.get("progress", 70),
+        "progress": 100,
         "messages": [{
             "role": "assistant",
-            "text": "We are unable to proceed with your application at "
-                    "this time. Our compliance team will be in touch if "
-                    "further action is required."
+            "text": "Your account is flagged for non compliance. A ticket has been raised. Bank staff will contact you in 1-2 days."
         }]
     }
 
@@ -146,52 +142,11 @@ def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
 # ── Node 3c: LLM review for ambiguous cases (score 30–69) ────────
 
 def llm_review_node(state: OnboardingState) -> dict[str, Any]:
-    r = state["aml_raw_results"]
     score = state["aml_risk_score"]
-
-    # Build a structured summary for the LLM — no raw JSON, just clear facts
-    signals = []
-    if r["rbi"]["hit"]:
-        signals.append(f"- RBI caution list: HIT ({r['rbi']['reason']})")
-    if r["ofac"]["hit"]:
-        signals.append(f"- OFAC sanctions: HIT (score {r['ofac']['match_score']}, "
-                       f"program {r['ofac']['program']})")
-    elif r["ofac"]["near_miss"]:
-        signals.append(f"- OFAC sanctions: near-miss (score {r['ofac']['match_score']})")
-    if r["pep"]["hit"]:
-        signals.append(f"- PEP: YES — {r['pep']['position']} (tier {r['pep']['pep_tier']})")
-    elif r["pep"]["near_miss"]:
-        signals.append(f"- PEP: near-miss (score {r['pep']['match_score']})")
-    for rule in r["rules"]["triggered_rules"]:
-        signals.append(f"- Rule triggered: {rule['rule_id']} — {rule['description']}")
-
-    signals_text = "\n".join(signals) if signals else "- No specific hits, risk from rules only"
-
-    prompt = f"""You are a bank compliance officer reviewing an account application 
-that has been flagged for human-equivalent review (risk score {score}/100).
-
-Applicant: {state['full_name']}
-DOB: {state.get('dob', 'not provided')}
-Account type: {state.get('account_type', 'not provided')}
-
-AML screening signals:
-{signals_text}
-
-A score of {score}/100 puts this in the REVIEW band (30–69).
-Consider whether the combination of signals warrants rejection or if 
-the application can proceed with enhanced due diligence.
-
-Respond with exactly:
-Line 1: CLEAR or FLAG
-Line 2: One sentence reason (max 20 words)"""
-
-    response = llm.invoke(prompt)
-    first_line = response.content.strip().split("\n")[0].strip().upper()
-
-    if "CLEAR" in first_line:
+    # Deterministic fallback for review band to avoid any LLM-induced stalls.
+    if score < 50:
         return auto_clear_node(state)
-    else:
-        return auto_flag_node(state)
+    return auto_flag_node(state)
 
 
 # ── Build the subgraph ────────────────────────────────────────────

@@ -477,42 +477,17 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
     )
 
     if aml_in_background or aml_status in (None, "pending", "checking"):
-        # AML not yet complete — run real fraud checks anyway
-        # but hold at fraud_check stage until AML settles.
-        # Do NOT fake a clear — the decision agent needs real signals.
-        l1_score, l1_signals = layer1_rule_checks(state)
-        l2_score, l2_signals = layer2_behavioural(state)
-        l3_score, l3_signals = layer3_identity(state)
-        combined = l1_score + l2_score + l3_score
-        all_signals = l1_signals + l2_signals + l3_signals
-        llm_result = layer4_llm_reasoning(combined, all_signals, state)
-        risk_score = llm_result.get("risk_score", combined)
-        if combined < 60:
-            risk_score = combined
-        _store_fraud_memory(
-            state,
-            l1_score=l1_score,
-            l1_signals=l1_signals,
-            l2_score=l2_score,
-            l2_signals=l2_signals,
-            l3_score=l3_score,
-            l3_signals=l3_signals,
-            llm_result=llm_result,
-            action="hold_pending_aml",
-            outcome_stage="fraud_check",
-            fraud_status="pending_aml",
-            risk_score=int(risk_score),
-        )
+        # AML is still running; avoid heavy LLM fraud checks to keep chat responsive.
         return {
             "stage": "fraud_check",
             "fraud_status": "pending_aml",
-            "fraud_risk_score": risk_score,
-            "fraud_signals": all_signals,
+            "fraud_risk_score": state.get("fraud_risk_score") or 0,
+            "fraud_signals": state.get("fraud_signals") or [],
             "progress": max(state.get("progress", 0), 80),
             "messages": [
                 {
                     "role": "assistant",
-                    "text": "Completing final checks on your application...",
+                    "text": "AML screening is in progress. We will continue immediately once checks are complete.",
                 }
             ],
         }
@@ -546,10 +521,11 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             "fraud_status": "flagged",
             "fraud_risk_score": state.get("fraud_risk_score") or 0,
             "fraud_signals": state.get("fraud_signals") or [],
+            "progress": 100,
             "messages": [
                 {
                     "role": "assistant",
-                    "text": "We are unable to proceed with this application after compliance review.",
+                    "text": "Your account is flagged for non compliance. A ticket has been raised. Bank staff will contact you in 1-2 days.",
                 }
             ],
         }
@@ -610,6 +586,7 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             "fraud_status": "rejected",
             "fraud_risk_score": risk_score,
             "fraud_signals": all_signals,
+            "progress": 100,
             "messages": [
                 {
                     "role": "assistant",

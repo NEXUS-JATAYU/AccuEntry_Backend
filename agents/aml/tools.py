@@ -5,6 +5,7 @@ from rapidfuzz import fuzz
 from core.mongodbase import aml_db
 import time
 from pymongo.errors import OperationFailure
+import re
 
 # Risk rules cache (TTL: 1 hour)
 _risk_rules_cache = {"data": None, "timestamp": 0, "ttl": 3600}
@@ -37,8 +38,18 @@ def _fallback_search(collection, full_name: str, limit: int = 5):
 
 def check_rbi_caution_list(pan: str) -> dict:
     """Exact PAN lookup against RBI caution list."""
+    normalized_pan = re.sub(r"\s+", "", str(pan or "")).upper().strip()
+    if not normalized_pan:
+        return {
+            "source": "rbi_caution_list",
+            "hit": False,
+            "reason": None,
+            "matched_name": None,
+            "bank": None,
+        }
+
     hit = aml_db.rbi_caution_list.find_one(
-        {"pan": pan.upper(), "active": True},
+        {"pan": normalized_pan, "active": True},
         {"_id": 0, "pan": 1, "name": 1, "reason": 1, "bank": 1}
     )
     return {
@@ -58,10 +69,22 @@ def check_ofac_sanctions(full_name: str) -> dict:
     3. rapidfuzz token_sort_ratio with early exit at 85+
     Threshold 85+ = hard hit. 70–84 = near-miss.
     """
+    normalized_name = " ".join(str(full_name or "").split()).strip()
+    if not normalized_name:
+        return {
+            "source": "ofac_sdn",
+            "hit": False,
+            "near_miss": False,
+            "match_score": 0,
+            "matched_name": None,
+            "program": None,
+            "uid": None,
+        }
+
     try:
         candidates = list(
             aml_db.ofac_sdn_list.find(
-                {"$text": {"$search": full_name}, "active": True},
+                {"$text": {"$search": normalized_name}, "active": True},
                 {"score": {"$meta": "textScore"}, "name": 1,
                  "aliases": 1, "program": 1, "uid": 1}
             ).sort([("score", {"$meta": "textScore"})]).limit(5)
@@ -69,13 +92,13 @@ def check_ofac_sanctions(full_name: str) -> dict:
     except OperationFailure as e:
         if "text index required" in str(e):
             # Fallback: no text index yet, search all active records
-            candidates = _fallback_search(aml_db.ofac_sdn_list, full_name)
+            candidates = _fallback_search(aml_db.ofac_sdn_list, normalized_name)
         else:
             raise
 
     best_score = 0
     best_match = None
-    query = full_name.lower().strip()
+    query = normalized_name.lower().strip()
 
     for candidate in candidates:
         # Check primary name
@@ -109,10 +132,23 @@ def check_pep_list(full_name: str) -> dict:
     Returns tier (1/2/3) and position for LLM context.
     Threshold 80+ = PEP match. Early exit at 80+.
     """
+    normalized_name = " ".join(str(full_name or "").split()).strip()
+    if not normalized_name:
+        return {
+            "source": "pep_list",
+            "hit": False,
+            "near_miss": False,
+            "match_score": 0,
+            "pep_tier": None,
+            "position": None,
+            "matched_name": None,
+            "jurisdiction": None,
+        }
+
     try:
         candidates = list(
             aml_db.pep_list.find(
-                {"$text": {"$search": full_name}, "active": True},
+                {"$text": {"$search": normalized_name}, "active": True},
                 {"name": 1, "dob": 1, "position": 1,
                  "pep_tier": 1, "related_to": 1, "jurisdiction": 1}
             ).limit(5)
@@ -120,13 +156,13 @@ def check_pep_list(full_name: str) -> dict:
     except OperationFailure as e:
         if "text index required" in str(e):
             # Fallback: no text index yet, search all active records
-            candidates = _fallback_search(aml_db.pep_list, full_name)
+            candidates = _fallback_search(aml_db.pep_list, normalized_name)
         else:
             raise
 
     best_score = 0
     best_match = None
-    query = full_name.lower().strip()
+    query = normalized_name.lower().strip()
 
     for candidate in candidates:
         score = fuzz.token_sort_ratio(query, candidate["name"].lower())
