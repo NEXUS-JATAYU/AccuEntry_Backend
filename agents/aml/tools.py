@@ -4,11 +4,16 @@ from typing import Optional
 from rapidfuzz import fuzz
 from core.mongodbase import aml_db
 import time
-from pymongo.errors import OperationFailure
+from pymongo.errors import ExecutionTimeout, OperationFailure
 import re
 
-# Risk rules cache (TTL: 1 hour)
-_risk_rules_cache = {"data": None, "timestamp": 0, "ttl": 3600}
+# Query/perf tuning constants.
+QUERY_MAX_MS = 1200
+TEXT_CANDIDATE_LIMIT = 3
+_PAN_WS_RE = re.compile(r"\s+")
+
+# Risk rules cache (TTL: 5 min)
+_risk_rules_cache = {"data": None, "timestamp": 0, "ttl": 300}
 
 
 def _get_cached_risk_rules():
@@ -27,18 +32,27 @@ def _fallback_search(collection, full_name: str, limit: int = 5):
     Returns all active documents (index required setup).
     """
     try:
-        return list(collection.find(
+        cursor = collection.find(
             {"active": True},
-            {"name": 1, "aliases": 1, "program": 1, "uid": 1, 
-             "dob": 1, "position": 1, "pep_tier": 1, "jurisdiction": 1}
-        ).limit(limit * 3))  # Get more docs to compensate for lack of ranking
+            {
+                "name": 1,
+                "aliases": 1,
+                "program": 1,
+                "uid": 1,
+                "dob": 1,
+                "position": 1,
+                "pep_tier": 1,
+                "jurisdiction": 1,
+            },
+        ).max_time_ms(QUERY_MAX_MS).limit(limit)
+        return list(cursor)
     except Exception:
         return []
 
 
 def check_rbi_caution_list(pan: str) -> dict:
     """Exact PAN lookup against RBI caution list."""
-    normalized_pan = re.sub(r"\s+", "", str(pan or "")).upper().strip()
+    normalized_pan = _PAN_WS_RE.sub("", str(pan or "")).upper().strip()
     if not normalized_pan:
         return {
             "source": "rbi_caution_list",
@@ -50,7 +64,8 @@ def check_rbi_caution_list(pan: str) -> dict:
 
     hit = aml_db.rbi_caution_list.find_one(
         {"pan": normalized_pan, "active": True},
-        {"_id": 0, "pan": 1, "name": 1, "reason": 1, "bank": 1}
+        {"_id": 0, "pan": 1, "name": 1, "reason": 1, "bank": 1},
+        max_time_ms=QUERY_MAX_MS,
     )
     return {
         "source": "rbi_caution_list",
@@ -82,19 +97,30 @@ def check_ofac_sanctions(full_name: str) -> dict:
         }
 
     try:
-        candidates = list(
+        cursor = (
             aml_db.ofac_sdn_list.find(
                 {"$text": {"$search": normalized_name}, "active": True},
-                {"score": {"$meta": "textScore"}, "name": 1,
-                 "aliases": 1, "program": 1, "uid": 1}
-            ).sort([("score", {"$meta": "textScore"})]).limit(5)
+                {
+                    "score": {"$meta": "textScore"},
+                    "name": 1,
+                    "aliases": 1,
+                    "program": 1,
+                    "uid": 1,
+                },
+            )
+            .sort([("score", {"$meta": "textScore"})])
+            .max_time_ms(QUERY_MAX_MS)
+            .limit(TEXT_CANDIDATE_LIMIT)
         )
+        candidates = list(cursor)
     except OperationFailure as e:
         if "text index required" in str(e):
             # Fallback: no text index yet, search all active records
-            candidates = _fallback_search(aml_db.ofac_sdn_list, normalized_name)
+            candidates = _fallback_search(aml_db.ofac_sdn_list, normalized_name, limit=TEXT_CANDIDATE_LIMIT)
         else:
             raise
+    except ExecutionTimeout:
+        candidates = []
 
     best_score = 0
     best_match = None
@@ -146,19 +172,30 @@ def check_pep_list(full_name: str) -> dict:
         }
 
     try:
-        candidates = list(
+        cursor = (
             aml_db.pep_list.find(
                 {"$text": {"$search": normalized_name}, "active": True},
-                {"name": 1, "dob": 1, "position": 1,
-                 "pep_tier": 1, "related_to": 1, "jurisdiction": 1}
-            ).limit(5)
+                {
+                    "name": 1,
+                    "dob": 1,
+                    "position": 1,
+                    "pep_tier": 1,
+                    "related_to": 1,
+                    "jurisdiction": 1,
+                },
+            )
+            .max_time_ms(QUERY_MAX_MS)
+            .limit(TEXT_CANDIDATE_LIMIT)
         )
+        candidates = list(cursor)
     except OperationFailure as e:
         if "text index required" in str(e):
             # Fallback: no text index yet, search all active records
-            candidates = _fallback_search(aml_db.pep_list, normalized_name)
+            candidates = _fallback_search(aml_db.pep_list, normalized_name, limit=TEXT_CANDIDATE_LIMIT)
         else:
             raise
+    except ExecutionTimeout:
+        candidates = []
 
     best_score = 0
     best_match = None

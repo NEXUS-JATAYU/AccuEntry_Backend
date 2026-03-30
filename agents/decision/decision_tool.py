@@ -338,7 +338,11 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "reason": "Fraud risk score is elevated and needs manual review.",
             "priority": "normal",
         })
-    elif fraud_score <= 59 and aml_status in {"clear", "checking", "pending", "pending_aml", None}:
+    elif (
+        fraud_score <= 59
+        and aml_status == "clear"
+        and (state.get("fraud_status") or "").lower() == "clear"
+    ):
         deterministic_result = approve_account.invoke({
             "session_id": session_id,
             "reason": "Low fraud risk and no AML flag.",
@@ -453,6 +457,20 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "reason": "LLM did not invoke any tool — routed to manual review",
             "priority": "normal",
         })
+
+    if tool_result.get("action") == "approve":
+        if aml_status != "clear" or (state.get("fraud_status") or "").lower() != "clear":
+            print(
+                f"[DEBUG][decision] approve_blocked_pending_checks session={session_id} "
+                f"aml_status={aml_status} fraud_status={state.get('fraud_status')}"
+            )
+            tool_result = {
+                "action": "hold_pending_checks",
+                "stage": "fraud_check",
+                "progress": 80,
+                "decision_reason": "Final decision blocked until AML and fraud checks are clear.",
+                "user_message": "We are finalizing AML and fraud checks before account activation.",
+            }
 
     if tool_result.get("action") == "approve":
         from agents.decision.otp_service import (

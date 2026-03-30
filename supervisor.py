@@ -68,6 +68,20 @@ def route(state: OnboardingState, completed: str | None = None) -> Any:
     ):
         logger.info("supervisor_route | stage=%s → node=%s", stage, END)
         return END
+
+    # Sequential guard: decisioning cannot run until AML and fraud are both clear.
+    if stage == "decision_agent":
+        aml_status = (state.get("aml_status") or "").lower()
+        fraud_status = (state.get("fraud_status") or "").lower()
+        if aml_status != "clear" or fraud_status != "clear":
+            logger.info(
+                "supervisor_route | blocked decision_agent aml=%s fraud=%s → node=%s",
+                aml_status,
+                fraud_status,
+                "fraud_check",
+            )
+            return "fraud_check"
+
     target = STAGE_TO_NODE.get(stage)
     if target is None:
         logger.info("supervisor_route | stage=%s → node=%s", stage, END)

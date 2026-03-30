@@ -58,14 +58,68 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
     pan_number = state.get("pan_number") or ""
     full_name = state.get("full_name") or ""
 
-    rbi_task = loop.run_in_executor(None, check_rbi_caution_list, pan_number)
+    # Fast-path: RBI PAN hit is sufficient for hard AML flag.
+    rbi = await loop.run_in_executor(None, check_rbi_caution_list, pan_number)
+    if rbi.get("hit"):
+        return {
+            "aml_status": "checking",
+            "aml_completed": False,
+            "aml_risk_score": state.get("aml_risk_score") or 0,
+            "aml_raw_results": {
+                "rbi": rbi,
+                "ofac": {
+                    "source": "ofac_sdn",
+                    "hit": False,
+                    "near_miss": False,
+                    "match_score": 0,
+                    "matched_name": None,
+                    "program": None,
+                    "uid": None,
+                },
+                "pep": {
+                    "source": "pep_list",
+                    "hit": False,
+                    "near_miss": False,
+                    "match_score": 0,
+                    "pep_tier": None,
+                    "position": None,
+                    "matched_name": None,
+                    "jurisdiction": None,
+                },
+                "rules": {
+                    "source": "risk_rules",
+                    "triggered_rules": [],
+                    "total_delta": 0,
+                },
+            },
+        }
+
     ofac_task = loop.run_in_executor(None, check_ofac_sanctions, full_name)
     pep_task = loop.run_in_executor(None, check_pep_list, full_name)
 
-    # Wait for all three checks to complete
-    rbi, ofac, pep = await asyncio.gather(
-        rbi_task, ofac_task, pep_task
-    )
+    # Bound non-RBI checks to avoid occasional long hangs.
+    try:
+        ofac, pep = await asyncio.wait_for(asyncio.gather(ofac_task, pep_task), timeout=3.5)
+    except asyncio.TimeoutError:
+        ofac = {
+            "source": "ofac_sdn",
+            "hit": False,
+            "near_miss": False,
+            "match_score": 0,
+            "matched_name": None,
+            "program": None,
+            "uid": None,
+        }
+        pep = {
+            "source": "pep_list",
+            "hit": False,
+            "near_miss": False,
+            "match_score": 0,
+            "pep_tier": None,
+            "position": None,
+            "matched_name": None,
+            "jurisdiction": None,
+        }
 
     # Now run rules once with real scores from OFAC/PEP
     rules = evaluate_risk_rules(
@@ -81,9 +135,9 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
         "aml_completed": False,
         "aml_risk_score": state.get("aml_risk_score") or 0,
         "aml_raw_results": {
-            "rbi":   rbi,
-            "ofac":  ofac,
-            "pep":   pep,
+            "rbi": rbi,
+            "ofac": ofac,
+            "pep": pep,
             "rules": rules,
         }
     }
