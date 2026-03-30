@@ -477,20 +477,22 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
     )
 
     if aml_in_background or aml_status in (None, "pending", "checking"):
-        # AML is still running; avoid heavy LLM fraud checks to keep chat responsive.
-        return {
-            "stage": "fraud_check",
-            "fraud_status": "pending_aml",
-            "fraud_risk_score": state.get("fraud_risk_score") or 0,
-            "fraud_signals": state.get("fraud_signals") or [],
-            "progress": max(state.get("progress", 0), 80),
-            "messages": [
-                {
-                    "role": "assistant",
-                    "text": "AML screening is in progress. We will continue immediately once checks are complete.",
-                }
-            ],
-        }
+        # If AML has already completed, proceed regardless of stale flags.
+        if not state.get("aml_completed"):
+            # AML is still running; avoid heavy LLM fraud checks to keep chat responsive.
+            return {
+                "stage": "fraud_check",
+                "fraud_status": "pending_aml",
+                "fraud_risk_score": state.get("fraud_risk_score") or 0,
+                "fraud_signals": state.get("fraud_signals") or [],
+                "progress": max(state.get("progress", 0), 80),
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "text": "AML screening is in progress. We will continue immediately once checks are complete.",
+                    }
+                ],
+            }
 
     if aml_status == "flagged":
         _memory.store_interaction(

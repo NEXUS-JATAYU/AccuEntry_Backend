@@ -1,4 +1,3 @@
-# agents/aml/scoring.py
 
 # Score weights — tune these without touching graph logic
 RBI_HIT_SCORE       = 80   # near-certain reject
@@ -16,6 +15,9 @@ def compute_risk_score(raw_results: dict) -> int:
     Pure function — takes raw tool outputs, returns integer 0–100.
     Called by aggregate_score node in the graph.
     """
+    if not raw_results or not isinstance(raw_results, dict):
+        return 0
+
     score = 0
     rbi   = raw_results.get("rbi", {})
     ofac  = raw_results.get("ofac", {})

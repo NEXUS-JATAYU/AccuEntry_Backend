@@ -11,6 +11,7 @@ import re
 QUERY_MAX_MS = 1200
 TEXT_CANDIDATE_LIMIT = 3
 _PAN_WS_RE = re.compile(r"\s+")
+_NAME_WS_RE = re.compile(r"\s+")
 
 # Risk rules cache (TTL: 5 min)
 _risk_rules_cache = {"data": None, "timestamp": 0, "ttl": 300}
@@ -50,6 +51,10 @@ def _fallback_search(collection, full_name: str, limit: int = 5):
         return []
 
 
+def _normalize_name(name: str) -> str:
+    return _NAME_WS_RE.sub(" ", str(name or "")).strip().lower()
+
+
 def check_rbi_caution_list(pan: str) -> dict:
     """Exact PAN lookup against RBI caution list."""
     normalized_pan = _PAN_WS_RE.sub("", str(pan or "")).upper().strip()
@@ -78,11 +83,9 @@ def check_rbi_caution_list(pan: str) -> dict:
 
 def check_ofac_sanctions(full_name: str) -> dict:
     """
-    Two-stage OFAC check with error handling:
-    1. Try MongoDB text index search (fast, requires index)
-    2. Fallback to simple search if index missing
-    3. rapidfuzz token_sort_ratio with early exit at 85+
-    Threshold 85+ = hard hit. 70–84 = near-miss.
+    OFAC check with exact-name hit semantics:
+    1. Try exact case-insensitive name/alias match (decisioning hit)
+    2. Use text/fuzzy search only for near-miss telemetry
     """
     normalized_name = " ".join(str(full_name or "").split()).strip()
     if not normalized_name:
@@ -94,6 +97,33 @@ def check_ofac_sanctions(full_name: str) -> dict:
             "matched_name": None,
             "program": None,
             "uid": None,
+        }
+
+    exact_regex = f"^{re.escape(normalized_name)}$"
+    try:
+        exact_hit = aml_db.ofac_sdn_list.find_one(
+            {
+                "active": True,
+                "$or": [
+                    {"name": {"$regex": exact_regex, "$options": "i"}},
+                    {"aliases": {"$elemMatch": {"$regex": exact_regex, "$options": "i"}}},
+                ],
+            },
+            {"_id": 0, "name": 1, "program": 1, "uid": 1},
+            max_time_ms=QUERY_MAX_MS,
+        )
+    except ExecutionTimeout:
+        exact_hit = None
+
+    if exact_hit:
+        return {
+            "source": "ofac_sdn",
+            "hit": True,
+            "near_miss": False,
+            "match_score": 100,
+            "matched_name": exact_hit.get("name"),
+            "program": exact_hit.get("program"),
+            "uid": exact_hit.get("uid"),
         }
 
     try:
@@ -124,14 +154,14 @@ def check_ofac_sanctions(full_name: str) -> dict:
 
     best_score = 0
     best_match = None
-    query = normalized_name.lower().strip()
+    query = _normalize_name(normalized_name)
 
     for candidate in candidates:
         # Check primary name
-        score = fuzz.token_sort_ratio(query, candidate["name"].lower())
+        score = fuzz.token_sort_ratio(query, _normalize_name(candidate.get("name")))
         # Check all aliases too
         for alias in candidate.get("aliases", []):
-            alias_score = fuzz.token_sort_ratio(query, alias.lower())
+            alias_score = fuzz.token_sort_ratio(query, _normalize_name(alias))
             score = max(score, alias_score)
 
         if score > best_score:
@@ -143,7 +173,7 @@ def check_ofac_sanctions(full_name: str) -> dict:
 
     return {
         "source": "ofac_sdn",
-        "hit": best_score >= 85,
+        "hit": False,
         "near_miss": 70 <= best_score < 85,
         "match_score": best_score,
         "matched_name": best_match["name"] if best_match else None,
@@ -154,9 +184,9 @@ def check_ofac_sanctions(full_name: str) -> dict:
 
 def check_pep_list(full_name: str) -> dict:
     """
-    Fuzzy name match against PEP list with error handling.
-    Returns tier (1/2/3) and position for LLM context.
-    Threshold 80+ = PEP match. Early exit at 80+.
+    PEP check with exact-name hit semantics:
+    1. Try exact case-insensitive name match (decisioning hit)
+    2. Use text/fuzzy search only for near-miss telemetry
     """
     normalized_name = " ".join(str(full_name or "").split()).strip()
     if not normalized_name:
@@ -169,6 +199,37 @@ def check_pep_list(full_name: str) -> dict:
             "position": None,
             "matched_name": None,
             "jurisdiction": None,
+        }
+
+    exact_regex = f"^{re.escape(normalized_name)}$"
+    try:
+        exact_hit = aml_db.pep_list.find_one(
+            {
+                "active": True,
+                "name": {"$regex": exact_regex, "$options": "i"},
+            },
+            {
+                "_id": 0,
+                "name": 1,
+                "pep_tier": 1,
+                "position": 1,
+                "jurisdiction": 1,
+            },
+            max_time_ms=QUERY_MAX_MS,
+        )
+    except ExecutionTimeout:
+        exact_hit = None
+
+    if exact_hit:
+        return {
+            "source": "pep_list",
+            "hit": True,
+            "near_miss": False,
+            "match_score": 100,
+            "pep_tier": exact_hit.get("pep_tier"),
+            "position": exact_hit.get("position"),
+            "matched_name": exact_hit.get("name"),
+            "jurisdiction": exact_hit.get("jurisdiction"),
         }
 
     try:
@@ -199,10 +260,10 @@ def check_pep_list(full_name: str) -> dict:
 
     best_score = 0
     best_match = None
-    query = normalized_name.lower().strip()
+    query = _normalize_name(normalized_name)
 
     for candidate in candidates:
-        score = fuzz.token_sort_ratio(query, candidate["name"].lower())
+        score = fuzz.token_sort_ratio(query, _normalize_name(candidate.get("name")))
         if score > best_score:
             best_score = score
             best_match = candidate
@@ -210,16 +271,15 @@ def check_pep_list(full_name: str) -> dict:
             if best_score >= 80:
                 break
 
-    hit = best_score >= 80
     return {
         "source": "pep_list",
-        "hit": hit,
+        "hit": False,
         "near_miss": 70 <= best_score < 80,
         "match_score": best_score,
-        "pep_tier": best_match.get("pep_tier") if hit else None,
-        "position": best_match.get("position") if hit else None,
-        "matched_name": best_match["name"] if hit else None,
-        "jurisdiction": best_match.get("jurisdiction") if hit else None,
+        "pep_tier": None,
+        "position": None,
+        "matched_name": best_match["name"] if best_match else None,
+        "jurisdiction": None,
     }
 
 

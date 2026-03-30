@@ -469,7 +469,8 @@ async def _run_aml_background(session_id: str) -> None:
             sessions[session_id] = _trim_messages({
                 **latest,
                 "aml_in_background": False,
-                "aml_status": "pending",
+                "aml_status": "flagged",
+                "aml_completed": True,
                 "stage": "manual_review",
                 "messages": (latest.get("messages") or []) + [
                     {
@@ -1161,6 +1162,33 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             state,
             config={"recursion_limit": 50},
         )
+
+        # ── Reconcile AML background results ─────────────────────
+        # The graph ran with a snapshot of the session. While it was
+        # executing, the AML background task may have completed and
+        # written fresh results directly to sessions[sid].  If the
+        # graph's output still carries stale AML values (e.g.
+        # aml_status="checking") but the live session already has the
+        # real outcome, prefer the live session's AML fields.
+        live = sessions.get(sid) or {}
+        live_aml_done = live.get("aml_completed", False)
+        graph_aml_stale = new_state.get("aml_status") in (None, "pending", "checking")
+        if live_aml_done and graph_aml_stale:
+            for key in (
+                "aml_status", "aml_completed", "aml_in_background",
+                "aml_risk_score", "aml_raw_results",
+            ):
+                if key in live:
+                    new_state[key] = live[key]
+            # Also pull back the metadata flag so AML doesn't re-trigger
+            live_meta = live.get("metadata") or {}
+            new_meta = new_state.get("metadata") or {}
+            new_state["metadata"] = {**new_meta, **{
+                k: live_meta[k] for k in ("aml_run_started", "aml_started_at")
+                if k in live_meta
+            }}
+        # ──────────────────────────────────────────────────────────
+
         print(
             f"[DEBUG][chat] graph_done sid={sid} stage_before={state.get('stage')} "
             f"stage_after={new_state.get('stage')} decision_action={new_state.get('decision_action')} "

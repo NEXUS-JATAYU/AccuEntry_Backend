@@ -310,6 +310,9 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
     except (TypeError, ValueError):
         annual_income = 0.0
 
+    # Deterministic decision rules — follow system prompt exactly.
+    # Check blocking conditions first, then approvals, then queues.
+    
     if aml_status == "flagged":
         deterministic_result = escalate_to_compliance.invoke({
             "session_id": session_id,
@@ -321,28 +324,27 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "session_id": session_id,
             "reason": "Fraud flagged with high risk score.",
         })
+    elif fraud_score >= 80:
+        deterministic_result = reject_application.invoke({
+            "session_id": session_id,
+            "reason": "Fraud risk score is critical.",
+        })
     elif source_of_funds in {"cryptocurrency", "cash"} and annual_income > 1_000_000:
         deterministic_result = queue_for_review.invoke({
             "session_id": session_id,
             "reason": "High-income cash/crypto source requires manual review.",
             "priority": "urgent",
         })
-    elif fraud_score >= 80:
-        deterministic_result = reject_application.invoke({
-            "session_id": session_id,
-            "reason": "Fraud risk score is critical.",
-        })
     elif fraud_score >= 60:
+        # Rule 5: fraud_score >= 60 AND < 80 → queue_for_review
         deterministic_result = queue_for_review.invoke({
             "session_id": session_id,
             "reason": "Fraud risk score is elevated and needs manual review.",
             "priority": "normal",
         })
-    elif (
-        fraud_score <= 59
-        and aml_status == "clear"
-        and (state.get("fraud_status") or "").lower() == "clear"
-    ):
+    elif fraud_score <= 59 and aml_status == "clear" and fraud_status == "clear":
+        # Rule 3: fraud_score <= 59 AND aml_status="clear" → approve_account
+        # Explicit fraud_status check to ensure both checks are truly complete.
         deterministic_result = approve_account.invoke({
             "session_id": session_id,
             "reason": "Low fraud risk and no AML flag.",
