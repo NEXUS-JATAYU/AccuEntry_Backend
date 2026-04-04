@@ -1536,18 +1536,32 @@ async def _post_to_accuverify(
 
 @app.post("/kyc/pan")
 async def proxy_pan(session_id: str = Form(...), file: UploadFile = File(...)):
+    state = sessions.get(session_id)
+    expected_name = state.get("full_name") if state else None
+    
+    params = {"user_id": session_id}
+    if expected_name:
+        params["expected_name"] = expected_name
+
     return await _post_to_accuverify(
         "upload-pan",
-        params={"user_id": session_id},
+        params=params,
         files={"file": (file.filename, await file.read(), file.content_type)},
     )
 
 
 @app.post("/kyc/aadhaar")
 async def proxy_aadhaar(session_id: str = Form(...), file: UploadFile = File(...)):
+    state = sessions.get(session_id)
+    expected_name = state.get("full_name") if state else None
+
+    params = {"user_id": session_id}
+    if expected_name:
+        params["expected_name"] = expected_name
+
     return await _post_to_accuverify(
         "upload-aadhaar",
-        params={"user_id": session_id},
+        params=params,
         files={"file": (file.filename, await file.read(), file.content_type)},
     )
 
