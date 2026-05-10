@@ -287,6 +287,13 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         f"fraud_status={fraud_status} aml_status={aml_status}"
     )
 
+    # Guard: if session already advanced to otp_verification or complete
+    # (e.g. from a parallel request), skip re-running the decision.
+    current_stage = state.get("stage", "")
+    if current_stage in {"otp_verification", "complete"}:
+        print(f"[DEBUG][decision] already_at_{current_stage}_skip session={session_id}")
+        return {}
+
     # 1. Log entry
     _audit.log_event(
         session_id,
@@ -515,7 +522,24 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             )
 
             otp_code = generate_otp(session_id)
-            if otp_code is None:
+            if otp_code == "ACTIVE_EXISTS":
+                print(f"[DEBUG][decision] otp_already_active session={session_id}")
+                tool_result["stage"] = "otp_verification"
+                tool_result["user_message"] = {
+                    "type": "OTP_REQUESTED",
+                    "channel": "chatbot",
+                    "payload": {
+                        "message": (
+                            "sending otp through email for activation.\n"
+                            f"An activation code was already sent to {masked}. "
+                            "Please enter it, or type 'resend code' if needed."
+                        ),
+                        "inputType": "otp",
+                        "otpLength": 4,
+                        "expiresInMinutes": 10,
+                    },
+                }
+            elif otp_code is None:
                 print(f"[DEBUG][decision] otp_generate_failed_or_rate_limited session={session_id}")
                 tool_result["stage"] = "otp_verification"
                 tool_result["user_message"] = {

@@ -61,10 +61,9 @@ def generate_otp(session_id: str) -> str | None:
     existing = _otp_store.get(session_id)
     recent_sends: list[float] = []
     if existing:
-        # Do not auto-generate a second code while an active one is still valid.
         if (not existing.used) and ((now - existing.created_at) <= OTP_EXPIRY_SECONDS):
             print(f"[DEBUG][otp_service] active_code_exists session={session_id}; skip_auto_regen")
-            return None
+            return "ACTIVE_EXISTS"
         recent_sends = [t for t in existing.send_timestamps if t > one_hour_ago]
         if len(recent_sends) >= MAX_SENDS_PER_HOUR:
             logger.warning("OTP rate limit hit for session %s", session_id)

@@ -32,10 +32,7 @@ OLLAMA_BASE_URL    : Ollama server URL (default: http://localhost:11434)
 FRAUD_LLM_MODEL    : optional model override (default: gemma2:2b)
 IP_BLOCKLIST_PATH  : path to newline-separated IP blocklist file (optional)
 
-NOTE: gemma2:2b is a small model — JSON instruction-following can be
-inconsistent. The prompt uses a few-shot example and the parser is
-defensive. If the model drifts, the rule-based fallback takes over
-automatically so onboarding is never blocked.
+
 """
 
 from __future__ import annotations
