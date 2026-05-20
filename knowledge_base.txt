@@ -1,0 +1,917 @@
+ACCOUNT BASICS 
+
+Q1: What is a bank account?
+A: A bank account is a financial account used to store and manage money securely.
+
+Q2: Why should I open a bank account?
+A: To safely store money, make transactions, and receive payments.
+
+Q3: What are the main types of bank accounts?
+A: Savings, Current, Salary, and Zero Balance accounts.
+
+Q4: What is a savings account?
+A: An account for individuals to save money and earn interest.
+
+Q5: What is a current account?
+A: An account designed for businesses with frequent transactions.
+
+Q6: What is a salary account?
+A: An account opened by employers to credit employee salaries.
+
+Q7: What is a zero balance account?
+A: An account that does not require maintaining a minimum balance.
+
+Q8: Can I open multiple bank accounts?
+A: Yes, you can open multiple accounts.
+
+Q9: Can students open a bank account?
+A: Yes, students can open savings accounts.
+
+Q10: Can unemployed individuals open an account?
+A: Yes, anyone meeting KYC requirements can open an account.
+
+Q11: What is the minimum age to open an account?
+A: Minors can open accounts with a guardian.
+
+Q12: Can senior citizens open accounts?
+A: Yes.
+
+Q13: What is a joint account?
+A: An account shared by two or more individuals.
+
+Q14: What is a nominee?
+A: A person who receives funds if something happens to the account holder.
+
+Q15: Is a nominee mandatory?
+A: No, but it is recommended.
+
+Q16: What is a customer ID?
+A: A unique identification number assigned by the bank.
+
+Q17: What is an account number?
+A: A unique number assigned to your bank account.
+
+Q18: What is an IFSC code?
+A: A code used to identify a specific bank branch.
+
+Q19: Can I open a bank account online?
+A: Yes.
+
+Q20: Can I open a bank account offline?
+A: Yes.
+
+Q21: Is there a fee for opening an account?
+A: Usually no, but it depends on the bank.
+
+Q22: Can I change my account type later?
+A: Yes, upon request.
+
+Q23: What is a passbook?
+A: A record of your transactions.
+
+Q24: What is a debit card?
+A: A card used to withdraw money and make payments.
+
+Q25: What is interest in a savings account?
+A: Earnings on the money deposited.
+
+Q26: Can I withdraw money anytime?
+A: Yes.
+
+Q27: Can I deposit cash in my account?
+A: Yes.
+
+Q28: What is an ATM?
+A: A machine used for cash withdrawals and other banking services.
+
+Q29: What is online banking?
+A: Banking through the internet.
+
+Q30: What is mobile banking?
+A: Banking using a mobile application.
+
+Q31: What is net banking?
+A: Another term for online banking.
+
+Q32: Can I link multiple accounts?
+A: Yes.
+
+Q33: Can I close my account anytime?
+A: Yes.
+
+Q34: What is a cheque book?
+A: A booklet used to make payments via cheques.
+
+Q35: Can I open an account without income proof?
+A: Yes, for savings accounts.
+
+Q36: Can I open an account from another city?
+A: Yes.
+
+Q37: Is Aadhaar linking required?
+A: It is recommended.
+
+Q38: Can I change my bank branch later?
+A: Yes.
+
+Q39: Can I freeze my bank account?
+A: Yes, by request.
+
+Q40: Can I reopen a closed account?
+A: It depends on the bank’s policy.
+
+KYC 
+
+Q41: What is KYC?
+A: KYC (Know Your Customer) is a process to verify identity and address.
+
+Q42: Why is KYC required?
+A: To prevent fraud and comply with regulations.
+
+Q43: Is KYC mandatory?
+A: Yes.
+
+Q44: What happens if KYC is not completed?
+A: Your account may be restricted.
+
+Q45: What are the types of KYC?
+A: Full KYC, e-KYC, and Video KYC.
+
+Q46: What is e-KYC?
+A: Online verification using Aadhaar.
+
+Q47: What is full KYC?
+A: Complete verification using documents.
+
+Q48: What is Video KYC?
+A: Identity verification via live video call.
+
+Q49: Can KYC be done online?
+A: Yes.
+
+Q50: How long does KYC take?
+A: Usually a few minutes to hours.
+
+Q51: Is PAN mandatory for KYC?
+A: Usually yes.
+
+Q52: Is Aadhaar mandatory?
+A: Not mandatory but commonly used.
+
+Q53: What is Form 60?
+A: A declaration used if PAN is not available.
+
+Q54: Can KYC fail?
+A: Yes.
+
+Q55: Why does KYC fail?
+A: Due to incorrect or unclear information.
+
+Q56: Can I redo KYC?
+A: Yes.
+
+Q57: Is KYC safe?
+A: Yes.
+
+Q58: Can KYC expire?
+A: Yes, in some cases.
+
+Q59: Can I update my KYC details?
+A: Yes.
+
+Q60: Do I need to visit a branch for KYC?
+A: Not always.
+
+Q61: Can I use digital documents?
+A: Yes.
+
+Q62: What if my name differs across documents?
+A: You may need additional verification.
+
+Q63: Can I complete KYC without Aadhaar?
+A: Yes.
+
+Q64: Can I complete KYC without PAN?
+A: Limited cases with Form 60.
+
+Q65: What is biometric KYC?
+A: Verification using fingerprints.
+
+Q66: Can KYC be done via mobile app?
+A: Yes.
+
+Q67: What if KYC is pending?
+A: Wait or retry verification.
+
+Q68: Can someone else complete KYC for me?
+A: No.
+
+Q69: Is KYC a one-time process?
+A: Mostly yes.
+
+Q70: Can I skip KYC?
+A: No.
+
+Q71: What happens after KYC is approved?
+A: Your account becomes fully functional.
+
+Q72: What happens if KYC is rejected?
+A: You need to re-submit correct details.
+
+Q73: Can I track KYC status?
+A: Yes.
+
+Q74: Is KYC required for all accounts?
+A: Yes.
+
+Q75: Can KYC be done offline?
+A: Yes.
+
+Q76: What documents are required for KYC?
+A: Identity and address proof.
+
+Q77: Can I use passport for KYC?
+A: Yes.
+
+Q78: Can I use driving license for KYC?
+A: Yes.
+
+Q79: What if my KYC is partially complete?
+A: Complete remaining steps.
+
+Q80: What if my KYC details change?
+A: Update them.
+
+Q81: Is video mandatory for KYC?
+A: In video KYC, yes.
+
+Q82: Can I pause KYC process?
+A: Yes.
+
+Q83: Can I restart KYC?
+A: Yes.
+
+Q84: Do I need internet for KYC?
+A: Yes for online KYC.
+
+Q85: Is Aadhaar OTP used in KYC?
+A: Yes, in e-KYC.
+
+Q86: Can KYC be done internationally?
+A: Depends on bank.
+
+Q87: What is KYC verification time?
+A: Usually same day.
+
+Q88: Can I use scanned documents?
+A: Yes.
+
+Q89: What if my document is expired?
+A: Provide valid one.
+
+Q90: Can I update KYC after account opening?
+A: Yes.
+
+Q91: Is KYC required again after years?
+A: Sometimes.
+
+Q92: What is periodic KYC?
+A: Re-verification after a period.
+
+Q93: What if I refuse KYC?
+A: Account may be blocked.
+
+Q94: Can KYC be done through agent?
+A: In some cases.
+
+Q95: Is KYC required for zero balance account?
+A: Yes.
+
+Q96: Can minors complete KYC?
+A: With guardian.
+
+Q97: Can NRIs complete KYC online?
+A: Yes.
+
+Q98: Is Aadhaar linking part of KYC?
+A: Often yes.
+
+Q99: What if KYC takes too long?
+A: Contact support.
+
+Q100: Can I cancel KYC process?
+A: Yes.
+
+DOCUMENTS 
+
+Q101: What documents are required to open an account?
+A: Identity proof and address proof.
+
+Q102: What is identity proof?
+A: A document like PAN, Aadhaar, or passport verifying your identity.
+
+Q103: What is address proof?
+A: A document showing your residential address.
+
+Q104: Can Aadhaar be used as both ID and address proof?
+A: Yes.
+
+Q105: Is PAN card mandatory?
+A: Usually yes.
+
+Q106: Can passport be used for account opening?
+A: Yes.
+
+Q107: Can driving license be used?
+A: Yes.
+
+Q108: What if my documents have different addresses?
+A: You may need additional proof.
+
+Q109: What if my name is different on documents?
+A: Additional verification may be required.
+
+Q110: Can I upload scanned documents?
+A: Yes.
+
+Q111: What file formats are accepted?
+A: JPG, PNG, or PDF.
+
+Q112: What if my document image is blurred?
+A: Re-upload a clear image.
+
+Q113: Can I upload black and white documents?
+A: Yes, if clearly visible.
+
+Q114: Can I upload cropped documents?
+A: No, full document must be visible.
+
+Q115: Can I use DigiLocker documents?
+A: Yes.
+
+Q116: What if my document is expired?
+A: Provide a valid document.
+
+Q117: Is a selfie required?
+A: Yes, for identity verification.
+
+Q118: Can I use a photocopy of documents?
+A: Only if scanned clearly.
+
+Q119: Can I edit uploaded documents?
+A: No.
+
+Q120: What if my document upload fails?
+A: Retry with correct format.
+
+Q121: Can I upload documents later?
+A: Depends on the process.
+
+Q122: Is document verification instant?
+A: Usually quick but may take time.
+
+Q123: What if document verification fails?
+A: Re-upload correct documents.
+
+Q124: Can I submit documents physically?
+A: Yes, for offline process.
+
+Q125: Are original documents required?
+A: Yes, especially for video KYC.
+
+Q126: Can I upload screenshots of documents?
+A: Not recommended.
+
+Q127: What if I don’t have address proof?
+A: Provide alternative documents.
+
+Q128: Can I use utility bills as proof?
+A: Yes.
+
+Q129: Can I use rent agreement as address proof?
+A: Sometimes accepted.
+
+Q130: What if my address has changed?
+A: Provide updated proof.
+
+Q131: Can I upload multiple documents?
+A: Yes, if required.
+
+Q132: Is signature required?
+A: Yes, in some cases.
+
+Q133: Can I use digital signature?
+A: Yes, if supported.
+
+Q134: Can I upload foreign documents?
+A: Depends on bank.
+
+Q135: What if my document is damaged?
+A: Provide a better copy.
+
+Q136: Can I use voter ID as proof?
+A: Yes.
+
+Q137: Can I use PAN as address proof?
+A: No.
+
+Q138: Can I use Aadhaar as identity proof only?
+A: Yes.
+
+Q139: Can I use multiple IDs?
+A: Yes.
+
+Q140: Is document verification secure?
+A: Yes.
+
+OTP & VERIFICATION 
+
+Q141: What is OTP?
+A: A one-time password sent to your email.
+
+Q142: Why is OTP required?
+A: To verify your email.
+
+Q143: What if OTP is not received?
+A: Check network or click on resend option.
+
+Q144: How long is OTP valid?
+A: Usually a few minutes.
+
+Q145: Can OTP expire?
+A: Yes.
+
+Q146: Can I request OTP again?
+A: Yes.
+
+Q147: Is OTP safe?
+A: Yes, if not shared.
+
+Q148: Should I share OTP?
+A: No.
+
+Q149: Can OTP be sent to email?
+A: Usually not.
+
+Q150: What if I entered wrong OTP?
+A: Retry.
+
+Q151: Can OTP be reused?
+A: No.
+
+Q152: How many OTP attempts are allowed?
+A: Limited attempts.
+
+Q153: What if OTP limit exceeds?
+A: Try later.
+
+Q154: Why am I not receiving OTP instantly?
+A: Network delay.
+
+Q155: Can I change mobile number for OTP?
+A: Yes.
+
+Q156: Is OTP required for every step?
+A: Not always.
+
+Q157: Can OTP fail?
+A: Yes.
+
+Q158: What if OTP verification fails?
+A: Retry.
+
+Q159: Can I disable OTP?
+A: No.
+
+Q160: Is OTP mandatory?
+A: Yes.
+
+Q161: Can I use international number?
+A: Usually no.
+
+Q162: Does OTP work offline?
+A: No.
+
+Q163: Can OTP be intercepted?
+A: Rare, but keep it private.
+
+Q164: What if SIM is not active?
+A: OTP won’t work.
+
+Q165: Can I verify using email instead?
+A: Usually not.
+
+Q166: Is OTP needed for login?
+A: Sometimes.
+
+Q167: Can I skip OTP?
+A: No.
+
+Q168: What if OTP message delayed?
+A: Wait or resend.
+
+Q169: Can I receive OTP on multiple devices?
+A: Only on registered number.
+
+Q170: Is OTP required for security?
+A: Yes.
+
+VIDEO KYC 
+
+Q171: What is Video KYC?
+A: A live video-based identity verification process.
+
+Q172: Is Video KYC mandatory?
+A: Yes, in digital onboarding.
+
+Q173: What do I need for Video KYC?
+A: Camera, internet, and documents.
+
+Q174: Can I schedule Video KYC?
+A: Yes, sometimes.
+
+Q175: Can I do Video KYC instantly?
+A: Yes, in some cases.
+
+Q176: What happens during Video KYC?
+A: A bank agent verifies your identity.
+
+Q177: Do I need original documents?
+A: Yes.
+
+Q178: Can I use photocopies?
+A: No.
+
+Q179: What if Video KYC fails?
+A: Retry.
+
+Q180: What if video call disconnects?
+A: Restart process.
+
+Q181: Is good lighting required?
+A: Yes.
+
+Q182: Is stable internet required?
+A: Yes.
+
+Q183: Can I do Video KYC at night?
+A: Yes.
+
+Q184: Is face matching required?
+A: Yes.
+
+Q185: Can I wear glasses during Video KYC?
+A: Yes, if face is visible.
+
+Q186: Can someone else attend Video KYC for me?
+A: No.
+
+Q187: Can I retry Video KYC multiple times?
+A: Yes.
+
+Q188: How long does Video KYC take?
+A: Few minutes.
+
+Q189: Is Video KYC safe?
+A: Yes.
+
+Q190: Is recording done during Video KYC?
+A: Yes, for verification.
+
+Q191: Can I pause Video KYC?
+A: No.
+
+Q192: What if I want to redo Video?
+A: You can.
+
+Q193: Can I use mobile for Video KYC?
+A: Yes.
+
+Q194: Can I use laptop?
+A: Yes.
+
+Q195: What if camera not working?
+A: Fix and retry.
+
+Q196: What if microphone not working?
+A: Fix and retry.
+
+Q197: Can I move during Video KYC?
+A: Minimal movement allowed.
+
+Q198: Can I complete Video KYC in one attempt?
+A: Yes.
+
+Q199: What happens after Video KYC?
+A: Verification is processed.
+
+Q200: Can Video KYC be rejected?
+A: Yes, if verification fails.
+
+🔹 ACCOUNT ACTIVATION & TIMELINE (Q201–Q230)
+
+Q201: When will my account be activated?
+A: After successful KYC verification.
+
+Q202: How long does account activation take?
+A: Usually within minutes to 24 hours.
+
+Q203: Will I get my account number instantly?
+A: Sometimes instantly, otherwise after approval.
+
+Q204: Will I receive confirmation after account opening?
+A: Yes, via SMS or email.
+
+Q205: Can I use my account before debit card arrives?
+A: Yes, through online banking.
+
+Q206: When will I receive my debit card?
+A: Within 5–7 working days.
+
+Q207: How will I receive my debit card?
+A: By courier to your registered address.
+
+Q208: Can I track my debit card delivery?
+A: Yes, via tracking link.
+
+Q209: What if my account is not activated?
+A: Check KYC status or contact support.
+
+Q210: Can activation be delayed?
+A: Yes, due to verification issues.
+
+Q211: What if my application is rejected?
+A: You need to reapply.
+
+Q212: Can I reapply immediately?
+A: Yes.
+
+Q213: Will I get a welcome kit?
+A: Yes, in some cases.
+
+Q214: What does a welcome kit include?
+A: Debit card, PIN instructions, and account details.
+
+Q215: Can I activate my debit card online?
+A: Yes.
+
+Q216: What is ATM PIN?
+A: A secure code used for transactions.
+
+Q217: How do I set ATM PIN?
+A: Via ATM, mobile app, or net banking.
+
+Q218: Can I change my PIN?
+A: Yes.
+
+Q219: What if I forget my PIN?
+A: Reset it via bank services.
+
+Q220: Is SMS alert activated automatically?
+A: Yes, usually.
+
+Q221: Can I start transactions immediately?
+A: Yes, after activation.
+
+Q222: Will I get net banking access automatically?
+A: Sometimes, otherwise register separately.
+
+Q223: Can I activate mobile banking immediately?
+A: Yes.
+
+Q224: What if activation email is not received?
+A: Check spam or resend.
+
+Q225: Can activation fail?
+A: Yes, if verification fails.
+
+Q226: What if my account is inactive?
+A: Complete KYC or contact bank.
+
+Q227: Can I activate account without KYC?
+A: No.
+
+Q228: Is activation free?
+A: Yes.
+
+Q229: Can I delay activation?
+A: Yes, but not recommended.
+
+Q230: What happens after activation?
+A: Full banking services become available.
+
+🔹 SECURITY & PRIVACY (Q231–Q260)
+
+Q231: Is my data safe during onboarding?
+A: Yes, banks use secure encryption.
+
+Q232: Is it safe to share PAN details?
+A: Yes, on secure platforms.
+
+Q233: Is it safe to share Aadhaar details?
+A: Yes, when required for KYC.
+
+Q234: Can my documents be misused?
+A: Banks have safeguards to prevent misuse.
+
+Q235: What security measures are used?
+A: Encryption, OTP verification, and secure servers.
+
+Q236: What is data encryption?
+A: Protection of data using coding techniques.
+
+Q237: Can hackers access my account?
+A: Very unlikely if security practices are followed.
+
+Q238: Should I share my OTP?
+A: No.
+
+Q239: Should I share my PIN?
+A: Never.
+
+Q240: What is phishing?
+A: Fraudulent attempt to steal information.
+
+Q241: How to avoid fraud?
+A: Never share sensitive details.
+
+Q242: Is Video KYC secure?
+A: Yes.
+
+Q243: Can someone impersonate me?
+A: Banks verify identity strictly.
+
+Q244: Is biometric data safe?
+A: Yes.
+
+Q245: What if I suspect fraud?
+A: Contact bank immediately.
+
+Q246: Can I block my account?
+A: Yes.
+
+Q247: Can I lock my debit card?
+A: Yes.
+
+Q248: Is mobile banking safe?
+A: Yes.
+
+Q249: What if I lose my phone?
+A: Block access immediately.
+
+Q250: Can I change my login password?
+A: Yes.
+
+Q251: What is two-factor authentication?
+A: Extra security layer using OTP.
+
+Q252: Is my chat with chatbot secure?
+A: Yes.
+
+Q253: Are my documents stored permanently?
+A: As per bank policy.
+
+Q254: Can I request data deletion?
+A: Yes, subject to regulations.
+
+Q255: Is public WiFi safe for banking?
+A: Not recommended.
+
+Q256: What is secure login?
+A: Login using verified credentials.
+
+Q257: Can I get alerts for transactions?
+A: Yes.
+
+Q258: What is fraud alert?
+A: Notification of suspicious activity.
+
+Q259: Is OTP enough for security?
+A: Part of security, not the only measure.
+
+Q260: Can I disable alerts?
+A: Yes, but not recommended.
+
+🔹 ERRORS & TROUBLESHOOTING (Q261–Q280)
+
+Q261: Why is my app not working?
+A: Check internet or restart.
+
+Q262: What if page is not loading?
+A: Refresh or try again.
+
+Q263: Why is document upload failing?
+A: Incorrect format or size.
+
+Q264: Why is my KYC rejected?
+A: Mismatch or unclear documents.
+
+Q265: What if OTP is not received?
+A: Check network or resend.
+
+Q266: What if app crashes?
+A: Restart application.
+
+Q267: What if I entered wrong details?
+A: Restart or correct them.
+
+Q268: What if my session expires?
+A: Login again.
+
+Q269: Why is KYC taking too long?
+A: Verification delay.
+
+Q270: What if video KYC fails repeatedly?
+A: Check setup and retry.
+
+Q271: What if camera not working?
+A: Check permissions.
+
+Q272: What if microphone not working?
+A: Enable access.
+
+Q273: What if internet disconnects?
+A: Reconnect and retry.
+
+Q274: What if account creation fails?
+A: Retry later.
+
+Q275: Can I resume application later?
+A: Yes.
+
+Q276: What if I forget application ID?
+A: Check SMS/email.
+
+Q277: What if system shows error?
+A: Retry or contact support.
+
+Q278: Can I contact customer care?
+A: Yes.
+
+Q279: What if my data is not saved?
+A: Re-enter details.
+
+Q280: What if I am stuck on a step?
+A: Follow instructions or retry.
+
+🔹 MULTILINGUAL & REAL USER QUERIES (Q281–Q300)
+
+Q281: KYC kya hota hai?
+A: Identity verify karne ka process hai.
+
+Q282: OTP nahi aa raha kya karu?
+A: Network check karo aur resend karo.
+
+Q283: PAN zaruri hai kya?
+A: Haan, mostly required hai.
+
+Q284: account kab active hoga?
+A: KYC ke baad.
+
+Q285: mera form submit nahi ho raha
+A: Check internet ya retry karein.
+
+Q286: video kyc fail ho gaya kya karu
+A: Dubara try karein.
+
+Q287: mujhe samajh nahi aa raha kya karna hai
+A: Instructions follow karein.
+
+Q288: keval aadhaar se account khul sakta hai?
+A: Haan, e-KYC me possible hai.
+
+Q289: keवाईसी क्या है?
+A: यह पहचान सत्यापन प्रक्रिया है।
+
+Q290: ओटीपी क्यों नहीं आ रहा?
+A: नेटवर्क जांचें और दोबारा प्रयास करें।
+
+Q291: खाता कब चालू होगा?
+A: केवाईसी के बाद।
+
+Q292: मेरा आवेदन रिजेक्ट क्यों हुआ?
+A: गलत जानकारी या दस्तावेज़।
+
+Q293: मुझे क्या करना चाहिए अब?
+A: अगले स्टेप फॉलो करें।
+
+Q294: why do you need my PAN?
+A: For identity verification.
+
+Q295: is this process safe?
+A: Yes, it is secure.
+
+Q296: what should i do next?
+A: Follow the next step shown.
+
+Q297: i am stuck on this step
+A: Retry or check instructions.
+
+Q298: my kyc is taking too long
+A: Kindly check your internet connectivity.
+
+Q299: i don’t understand this step
+A: It is for verification; follow instructions.
+
+Q300: is my data सुरक्षित?
+A: Yes, your data is protected.

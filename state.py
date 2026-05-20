@@ -109,3 +109,12 @@ class OnboardingState(TypedDict):
 
     # ── Doc verification subgraph (optional routing / failure handling) ─
     doc_failure_type: Optional[str]  # "pan" | "aadhaar" | "face" when routing to failure_node
+
+    # In OnboardingState, add under the AML section:
+    aml_policy_excerpt: Optional[str]   # RAG excerpt that justified AML flag
+
+    # Under data capture scratch:
+    rag_policy_context: Optional[str]   # RAG context for current session
+
+    # Under decision agent:
+    decision_policy_excerpt: Optional[str]  # RAG excerpt attached to audit log

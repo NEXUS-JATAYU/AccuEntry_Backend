@@ -10,6 +10,7 @@ from agents.aml.tools import (
     evaluate_risk_rules,
 )
 from agents.aml.aml_scoring import compute_risk_score, route_by_score
+from rag_service import retrieve_as_context
 
 _memory = AgentMemoryManager()
 
@@ -187,6 +188,7 @@ def auto_clear_node(state: OnboardingState) -> dict[str, Any]:
     _store_aml_memory(state, final_status="clear", outcome_stage="fraud_check")
     return {
         "aml_status": "clear",
+        "aml_completed": True,
         "aml_risk_score": int(state.get("aml_risk_score") or 0),
         "stage": "fraud_check",
         "progress": 80,
@@ -202,9 +204,23 @@ def auto_clear_node(state: OnboardingState) -> dict[str, Any]:
 
 def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
     _store_aml_memory(state, final_status="flagged", outcome_stage="rejected")
+    raw_aml = state.get("aml_raw_results") or {}
+    pep_hit = (raw_aml.get("pep") or {}).get("hit")
+    ofac_hit = (raw_aml.get("ofac") or {}).get("hit")
+    flag_type = "PEP" if pep_hit else ("OFAC sanctions" if ofac_hit else "AML")
+    
+    try:
+        policy_excerpt = retrieve_as_context(f"AML rules for {flag_type}", top_k=3)
+    except Exception as e:
+        policy_excerpt = "Standard AML non-compliance policy applied."
+        print(f"Failed to retrieve policy: {e}")
+    
+    _store_aml_memory(state, final_status="flagged", outcome_stage="rejected")
     return {
         "aml_status": "flagged",
+        "aml_completed": True,
         "aml_risk_score": int(state.get("aml_risk_score") or 0),
+        "aml_policy_excerpt": policy_excerpt,
         "stage": "rejected",
         "progress": 100,
         "messages": [{

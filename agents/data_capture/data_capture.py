@@ -14,10 +14,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-
+from rag_service import retrieve_as_context
 from memory_manager import AgentMemoryManager
 from agents.data_capture.data_capture_validators import (
-    parse_skip,
+    parse_skip, 
     validate_address,
     validate_amount,
     validate_choice,
@@ -135,6 +135,14 @@ def _get_llm() -> ChatOllama:
 
 def entry_node(state: OnboardingState) -> dict[str, Any]:
     target = _first_missing(state)
+    if target and not state.get("messages"):
+    # First message of the session — prime the agent with policy context
+        account_type = state.get("account_type") or "savings account"
+        user_type = state.get("occupation_type") or "general"
+        rag_context = retrieve_as_context(f"documents required for {account_type} for {user_type}")
+    # Store on state so capture_node / validate_node can reference it
+    # (just a metadata key, never shown directly to user)
+        out["rag_policy_context"] = rag_context
     out: dict[str, Any] = {"capture_target": target, "capture_error": None}
 
     if target is None:
@@ -179,7 +187,8 @@ async def capture_node(state: OnboardingState) -> dict[str, Any]:
 
     options = CHOICES.get(target)
     options_text = f"Allowed values: {', '.join(options)}. " if options else ""
-
+    rag_ctx = state.get("rag_policy_context")
+    policy_context_text = f"Relevant policy context: {rag_ctx}" if rag_ctx else ""
     llm = _get_llm()
     system = SystemMessage(
         content=(
@@ -189,6 +198,7 @@ async def capture_node(state: OnboardingState) -> dict[str, Any]:
             f"{options_text}"
             "Reply with only the extracted value, no explanation. "
             "If nothing relevant is present, reply with an empty string."
+            f"{policy_context_text}"
         )
     )
     human = HumanMessage(content=user_text)

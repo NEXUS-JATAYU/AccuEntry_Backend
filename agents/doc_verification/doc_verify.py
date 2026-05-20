@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-
+from rag_service import retrieve_as_context
 from core.http_client_pool import get_http_client
 from memory_manager import AgentMemoryManager
 from state import OnboardingState
@@ -279,6 +279,15 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
 
 def failure_node(state: OnboardingState) -> dict[str, Any]:
     kind = state.get("doc_failure_type") or "pan"
+    rag_query = f"valid documents for {kind} proof" if kind != "face" \
+                else "selfie face matching requirements"
+    policy_excerpt = retrieve_as_context(rag_query, top_k=2)
+    _store_doc_verify_memory(
+        state,
+        status=f"retry_requested_{kind}",
+        outcome_stage="doc_verification",
+        verify_payload={"failure_kind": kind, "policy_excerpt": policy_excerpt},
+    )
     import json
     if kind == "video_kyc":
         msg = json.dumps({

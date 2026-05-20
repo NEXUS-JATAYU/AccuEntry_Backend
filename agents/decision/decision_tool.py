@@ -24,6 +24,7 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from rag_service import retrieve_as_context
 from audit_logger import AuditLogger
 from llm_config import AgentLLM
 from memory_manager import AgentMemoryManager
@@ -221,6 +222,18 @@ def _build_decision_context(state: OnboardingState) -> str:
         "audit_session_id": state.get("audit_session_id"),
     }
 
+    #RAG
+    fraud_score = context.get("fraud_score", 0)
+    aml_status = context.get("aml_status", "")
+    if aml_status == "flagged":
+        rag_query = "KYC re-verification requirements AML escalation"
+    elif fraud_score >= 60:
+        rag_query = "rejection criteria high fraud risk score"
+    else:
+        rag_query = "account approval criteria low risk"
+    
+    policy_excerpt = retrieve_as_context(rag_query, top_k=3)
+
     similar = _memory.retrieve_similar(
         "decision_agent",
         query_data=context,
@@ -234,6 +247,9 @@ def _build_decision_context(state: OnboardingState) -> str:
 
     if similar:
         lines.append("\nSimilar past cases:")
+        if policy_excerpt:
+            lines.append("\nRelevant policy excerpt:")
+            lines.append(policy_excerpt)
         for i, case in enumerate(similar, 1):
             out = case.get("output_data", {})
             lines.append(
@@ -674,6 +690,7 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "action": decision_action,
             "stage": stage,
             "reason": decision_reason,
+            "policy_excerpt": retrieve_as_context(f"rejection criteria for {decision_action}", top_k=2),
         },
         decision=decision_action,
         metadata={
