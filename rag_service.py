@@ -23,6 +23,23 @@ def _load_chunks(path : str = KNOWLEDGE_BASE_DIR) -> list[str]:
     chunks = [chunk.strip() for chunk in content.split('\n\n') if chunk.strip()]
     return chunks
 
+
+def _lexical_retrieve(query: str, top_k: int = TOP_K) -> list[str]:
+    chunks = _load_chunks()
+    query_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+    if not query_tokens:
+        return chunks[:top_k]
+
+    scored = sorted(
+        chunks,
+        key=lambda chunk: (
+            len(query_tokens & set(re.findall(r"[a-z0-9]+", chunk.lower()))),
+            len(chunk),
+        ),
+        reverse=True,
+    )
+    return scored[:top_k]
+
 def _chunk_id(text: str) -> str:
     # Create a unique ID based on the text content (you can use hashing or a simple counter)
     return hashlib.md5(text.encode('utf-8')).hexdigest()  # Simple example: use MD5 hash
@@ -55,23 +72,20 @@ def _get_collection():
 
 #api
 def retrieve(query: str, top_k: int = TOP_K) -> list[str]:
-    collection = _get_collection()
-    if collection is not None:
-        try:
-            collection = _get_collection()
-            results = collection.query(query_texts=[query], n_results=top_k)
-            return results['documents'][0] if results and 'documents' in results else []
-        except Exception as e:
-            print(f"Error retrieving relevant chunks: {e}")
-            raise RuntimeError("Failed to retrieve relevant chunks. Please check the logs for details.")
-        
-    chunks    = _load_chunks()
-    q_tokens  = set(query.lower().split())
-    scored    = sorted(
-    chunks,
-    key=lambda c: len(q_tokens & set(c.lower().split())),
-    reverse=True,)
-    return scored[:top_k]
+    try:
+        collection = _get_collection()
+        if collection is not None:
+            try:
+                results = collection.query(query_texts=[query], n_results=top_k)
+                documents = results.get('documents') if isinstance(results, dict) else None
+                if documents and documents[0]:
+                    return [chunk for chunk in documents[0] if chunk]
+            except Exception as e:
+                print(f"Error retrieving relevant chunks from ChromaDB: {e}")
+    except Exception as e:
+        print(f"Error initializing ChromaDB collection: {e}")
+
+    return _lexical_retrieve(query, top_k=top_k)
 
 
 

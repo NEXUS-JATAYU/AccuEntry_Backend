@@ -260,6 +260,13 @@ def _build_decision_context(state: OnboardingState) -> str:
     return "\n".join(lines)
 
 
+def _is_low_risk_approval_candidate(state: OnboardingState) -> bool:
+    aml_status = (state.get("aml_status") or "").lower()
+    fraud_status = (state.get("fraud_status") or "").lower()
+    fraud_score = state.get("fraud_risk_score") or 0
+    return aml_status == "clear" and fraud_status == "clear" and fraud_score <= 59
+
+
 # ---------------------------------------------------------------------------
 # SECTION 4 — Agentic Node
 # ---------------------------------------------------------------------------
@@ -709,15 +716,45 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
 async def decision_agent_node(state: OnboardingState) -> dict[str, Any]:
     """Async decision node with 15-second timeout. Falls back to manual_review."""
     session_id = state.get("audit_session_id", "unknown")
+    timeout_seconds = 60.0 if _is_low_risk_approval_candidate(state) else 15.0
     try:
-        return await asyncio.wait_for(_run_decision_agent(state), timeout=15.0)
+        return await asyncio.wait_for(_run_decision_agent(state), timeout=timeout_seconds)
     except asyncio.TimeoutError:
         logger.warning("Decision agent timed out for session %s", session_id)
+        from agents.decision.otp_service import otp_recently_sent, mask_email
+
+        if _is_low_risk_approval_candidate(state) and otp_recently_sent(session_id):
+            masked = mask_email(state.get("email_id") or "")
+            return {
+                "stage": "otp_verification",
+                "decision_reason": "Approval path completed; OTP already sent.",
+                "decision_action": "approve",
+                "progress": 95,
+                "admin_override": False,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "type": "OTP_REQUESTED",
+                        "channel": "chatbot",
+                        "payload": {
+                            "message": (
+                                "sending otp through email for activation.\n"
+                                f"We have sent a 4-digit Activation Code to your email {masked}.\n"
+                                "Please enter the code to activate your account."
+                            ),
+                            "inputType": "otp",
+                            "otpLength": 4,
+                            "expiresInMinutes": 10,
+                        },
+                    }
+                ],
+            }
+
         _audit.log_event(
             session_id,
             "decision_agent_error",
             metadata={
-                "error": "Timeout after 15 seconds",
+                "error": f"Timeout after {timeout_seconds:.0f} seconds",
                 "audit_session_id": state.get("audit_session_id") or session_id,
                 "workflow_stage": state.get("stage") or "decision_agent",
                 "decision_source": "llm",

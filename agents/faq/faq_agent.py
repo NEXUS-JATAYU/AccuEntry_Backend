@@ -6,6 +6,7 @@ from rag_service import retrieve_as_context
 from state import OnboardingState
 from prompts import SYSTEM_PROMPT
 import os
+import re
 
 # _FAQ_SYSTEM = """
 # You are a helpful onboarding assistant for AccuEntry bank.
@@ -13,6 +14,33 @@ import os
 # If the answer is not in the excerpts, say you'll connect them with support.
 # Keep answers under 3 sentences.
 # """.strip()
+
+def _extract_best_knowledge_answer(context: str, user_text: str) -> str:
+    if not context:
+        return ""
+
+    blocks = [block.strip() for block in context.split("\n\n---\n\n") if block.strip()]
+    user_tokens = set(re.findall(r"[a-z0-9]+", user_text.lower()))
+
+    best_block = ""
+    best_score = -1
+    for block in blocks:
+        block_tokens = set(re.findall(r"[a-z0-9]+", block.lower()))
+        score = len(user_tokens & block_tokens)
+        if score > best_score:
+            best_score = score
+            best_block = block
+
+    if not best_block:
+        return ""
+
+    answer_lines = [line.strip() for line in best_block.splitlines() if line.strip()]
+    for line in answer_lines:
+        if line.upper().startswith("A:"):
+            return line[2:].strip()
+
+    return re.sub(r"^Q\d+:\s*", "", answer_lines[0]).strip()
+
 
 async def faq_node(state: OnboardingState) -> dict:
     user_text = next(
@@ -23,12 +51,32 @@ async def faq_node(state: OnboardingState) -> dict:
         return {}
 
     policy_chunks = retrieve_as_context(user_text, top_k=4)
+    if not policy_chunks:
+        return {
+            "messages": [{
+                "role": "assistant",
+                "text": "I'm sorry, I couldn't find that information in the knowledge base. Please contact support or try rephrasing your question.",
+            }]
+        }
+
+    formatted_prompt = SYSTEM_PROMPT.format(context=policy_chunks, question=user_text)
     
-    llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "gemma2:2b"), temperature=0)
-    response = await llm.ainvoke([
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=f"Policy excerpts:\n{policy_chunks}\n\nUser question: {user_text}"),
-    ])
+    try:
+        llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "gemma2:2b"), temperature=0)
+        response = await llm.ainvoke([
+            SystemMessage(content=formatted_prompt),
+            HumanMessage(content=user_text),
+        ])
+        answer = str(getattr(response, "content", "") or "").strip()
+    except Exception:
+        answer = ""
+
+    if not answer:
+        answer = _extract_best_knowledge_answer(policy_chunks, user_text)
+
+    if not answer:
+        answer = "I'm sorry, I couldn't find that information in the knowledge base. Please contact support or try rephrasing your question."
+
     return {
-        "messages": [{"role": "assistant", "text": response.content}]
+        "messages": [{"role": "assistant", "text": answer}]
     }

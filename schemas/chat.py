@@ -13,6 +13,8 @@ class ChatResponse(BaseModel):
     stage: str = "data_capture"
     action: str | None = None
     completed: bool = False
+    session_ended: bool = False
+    session_end_reason: str | None = None
     step: int = 1
     current_main_step: str = "Detail Capture"
     aml_status: str | None = "pending"

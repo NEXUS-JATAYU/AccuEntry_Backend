@@ -16,6 +16,7 @@ from fastapi import FastAPI, Form, UploadFile, File, Depends, HTTPException
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
+from sqlalchemy import inspect, text
 from schemas.chat import (
     ChatRequest,
     ChatResponse,
@@ -29,6 +30,7 @@ from sqlalchemy.orm import Session
 from core.database import engine, Base, get_db
 from core.http_client_pool import close_http_client, get_http_client
 from agents.aml.aml_screening import build_aml_graph
+from agents.faq.faq_agent import faq_node
 from agents.data_capture.data_capture_validators import (
     validate_name,
     validate_date,
@@ -49,6 +51,31 @@ from core.redis_client import redis_client
 
 # Initialize DB tables
 Base.metadata.create_all(bind=engine)
+
+
+def _sync_customer_details_schema() -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE customer_details ADD COLUMN IF NOT EXISTS session_id VARCHAR"))
+            inspector = inspect(conn)
+            if "customer_details" not in inspector.get_table_names():
+                return
+
+            for constraint in inspector.get_unique_constraints("customer_details"):
+                constraint_name = constraint.get("name")
+                if constraint_name:
+                    conn.execute(text(f'ALTER TABLE customer_details DROP CONSTRAINT IF EXISTS "{constraint_name}"'))
+
+            for index in inspector.get_indexes("customer_details"):
+                if index.get("unique"):
+                    index_name = index.get("name")
+                    if index_name:
+                        conn.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
+    except Exception as exc:
+        print(f"[DEBUG][schema] customer_details_sync_failed err={exc}")
+
+
+_sync_customer_details_schema()
 
 # Initialize AML MongoDB indices
 init_aml_indices()
@@ -72,6 +99,8 @@ agent_memory = AgentMemoryManager()
 MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "120"))
 USE_REDIS_SESSIONS = os.getenv("USE_REDIS_SESSIONS", "true").lower() in {"1", "true", "yes"}
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
+SESSION_IDLE_TIMEOUT_SECONDS = int(os.getenv("SESSION_IDLE_TIMEOUT_SECONDS", "600"))
+SESSION_IDLE_TIMEOUT_MESSAGE = "Your session has expired after 10 minutes of inactivity. Please start a new chat to continue."
 HITL_TERMINAL_STAGES = {"manual_review", "pending_docs", "escalated", "rejected", "otp_verification", "complete"}
 HITL_FLAG_STAGES = {"manual_review", "pending_docs", "escalated", "rejected"}
 
@@ -157,6 +186,84 @@ def _session_cache_key(session_id: str) -> str:
     return f"accuentry:session:{session_id}"
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _session_metadata(state: OnboardingState) -> dict:
+    return dict(state.get("metadata") or {})
+
+
+def _session_last_activity_at(state: OnboardingState) -> datetime | None:
+    metadata = _session_metadata(state)
+    return _parse_iso_datetime(metadata.get("last_activity_at") or metadata.get("updated_at"))
+
+
+def _session_is_closed(state: OnboardingState) -> bool:
+    return bool(_session_metadata(state).get("session_closed"))
+
+
+def _mark_session_activity(state: OnboardingState, now: datetime | None = None) -> None:
+    now = now or datetime.now(timezone.utc)
+    state["metadata"] = {
+        **_session_metadata(state),
+        "last_activity_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "session_closed": False,
+    }
+
+
+def _mark_session_closed(state: OnboardingState, *, reason: str, now: datetime | None = None) -> None:
+    now = now or datetime.now(timezone.utc)
+    state["metadata"] = {
+        **_session_metadata(state),
+        "session_closed": True,
+        "session_end_reason": reason,
+        "session_closed_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+
+
+def _is_session_idle_expired(state: OnboardingState, now: datetime | None = None) -> bool:
+    if _session_is_closed(state):
+        return True
+    now = now or datetime.now(timezone.utc)
+    last_activity = _session_last_activity_at(state)
+    if last_activity is None:
+        return False
+    return (now - last_activity).total_seconds() > SESSION_IDLE_TIMEOUT_SECONDS
+
+
+def _session_closed_response(state: OnboardingState, *, reason: str) -> ChatResponse:
+    stage = state.get("stage", "data_capture")
+    step, main_step = _ui_step_and_label(stage)
+    reply = SESSION_IDLE_TIMEOUT_MESSAGE if reason == "idle_timeout" else _last_assistant_text(state.get("messages", [])) or SESSION_IDLE_TIMEOUT_MESSAGE
+    return ChatResponse(
+        message=reply,
+        progress=state.get("progress", 0),
+        requires_upload=state.get("requires_upload", False),
+        stage=stage,
+        completed=stage == "complete",
+        session_ended=True,
+        session_end_reason=reason,
+        step=step,
+        current_main_step=main_step,
+        aml_status=state.get("aml_status", "pending"),
+        aml_in_background=state.get("aml_in_background", False),
+        fraud_status=state.get("fraud_status"),
+        fraud_risk_score=state.get("fraud_risk_score"),
+        fraud_signals=state.get("fraud_signals", []),
+        fraud_reasoning=state.get("fraud_reasoning"),
+        otp_required=False,
+    )
+
+
 async def _save_session_cache(session_id: str, state: OnboardingState) -> None:
     if not USE_REDIS_SESSIONS or redis_client is None:
         return
@@ -227,7 +334,10 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "fraud_risk_score": None,
         "fraud_signals": [],
         "fraud_reasoning": None,
-        "metadata": {},
+        "metadata": {
+            "last_activity_at": _iso_now(),
+            "session_closed": False,
+        },
         "progress": 0,
         "requires_upload": False,
         "capture_target": None,
@@ -574,18 +684,34 @@ def _save_state_to_db(state: OnboardingState, db: Session) -> None:
         return
         
     try:
-        cust = db.query(CustomerDetails).filter(CustomerDetails.c_phone_number == state["mobile_number"]).first()
+        session_id = state.get("session_id") or state.get("audit_session_id")
+        cust = None
+        if session_id:
+            cust = db.query(CustomerDetails).filter(CustomerDetails.session_id == session_id).first()
         if not cust:
-            cust = CustomerDetails(c_phone_number=state["mobile_number"])
+            cust = db.query(CustomerDetails).filter(CustomerDetails.c_phone_number == state["mobile_number"]).first()
+        if not cust:
+            cust = CustomerDetails(
+                session_id=session_id,
+                c_phone_number=state["mobile_number"],
+                c_email=state["email_id"],
+                c_pan=state["pan_number"],
+                c_name=state["full_name"],
+                c_account_type=state.get("account_type") or "Savings",
+                c_address=state["address"],
+                c_occupation=state["occupation_type"],
+                c_dob=c_dob_date,
+            )
             db.add(cust)
-            
-        cust.c_name = state["full_name"]
-        cust.c_account_type = state.get("account_type") or "Savings"
-        cust.c_email = state["email_id"]
-        cust.c_address = state["address"]
-        cust.c_occupation = state["occupation_type"]
-        cust.c_pan = state["pan_number"]
-        cust.c_dob = c_dob_date
+        else:
+            cust.session_id = session_id or cust.session_id
+            cust.c_name = state["full_name"]
+            cust.c_account_type = state.get("account_type") or "Savings"
+            cust.c_email = state["email_id"]
+            cust.c_address = state["address"]
+            cust.c_occupation = state["occupation_type"]
+            cust.c_pan = state["pan_number"]
+            cust.c_dob = c_dob_date
         
         db.commit()
     except Exception as e:
@@ -879,6 +1005,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     try:
         sid = (request.session_id or "").strip() or str(uuid.uuid4())
         print(f"[DEBUG][chat] incoming sid={sid} user_input={request.user_input!r}")
+        now = datetime.now(timezone.utc)
         if sid not in sessions:
             cached = await _load_session_cache(sid)
             if cached is not None:
@@ -899,6 +1026,19 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             print(f"[DEBUG][chat] session_id_missing_set sid={sid}")
         _persist_session_tracking(state, db)
         text = (request.user_input or "").strip()
+        if _is_session_idle_expired(state, now):
+            if not _session_is_closed(state):
+                _mark_session_closed(state, reason="idle_timeout", now=now)
+                state["messages"].append({"role": "assistant", "text": SESSION_IDLE_TIMEOUT_MESSAGE})
+                sessions[sid] = _trim_messages(state)
+                await _save_session_cache(sid, sessions[sid])
+                _save_state_to_db(sessions[sid], db)
+                _persist_session_tracking(sessions[sid], db)
+            closed_state = sessions[sid]
+            print(f"[DEBUG][chat] idle_session_closed sid={sid}")
+            return _session_closed_response(closed_state, reason="idle_timeout")
+        if text:
+            _mark_session_activity(state, now)
         print(
             f"[DEBUG][chat] sid={sid} stage={state.get('stage')} "
             f"audit={state.get('audit_session_id')} text_present={bool(text)}"
@@ -938,12 +1078,68 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 otp_required=stage == "otp_verification",
             )
 
+        # Post-activation FAQ mode: once onboarding is complete, let the user
+        # ask follow-up questions through the RAG FAQ service.
+        if state.get("stage") == "complete" and text:
+            faq_state: OnboardingState = {
+                **state,
+                "messages": list(state.get("messages", [])) + [{"role": "user", "text": text}],
+            }
+            try:
+                faq_update = await faq_node(faq_state)
+                assistant_messages = faq_update.get("messages") if isinstance(faq_update, dict) else []
+                assistant_text = ""
+                if assistant_messages:
+                    last_message = assistant_messages[-1]
+                    if isinstance(last_message, dict):
+                        assistant_text = str(last_message.get("text") or "").strip()
+                if not assistant_text:
+                    assistant_text = "I could not find that information in the knowledge base. Please contact support or try rephrasing your question."
+            except Exception as exc:
+                logger.exception("FAQ RAG failed for session %s", sid)
+                assistant_text = (
+                    "I could not find that information in the knowledge base right now. "
+                    "Please contact support or try rephrasing your question."
+                )
+
+            faq_state["messages"].append({"role": "assistant", "text": assistant_text})
+            sessions[sid] = _trim_messages(faq_state)
+            sessions[sid]["metadata"] = {
+                **(sessions[sid].get("metadata") or {}),
+                "last_activity_at": _iso_now(),
+                "updated_at": _iso_now(),
+                "session_closed": False,
+            }
+            await _save_session_cache(sid, sessions[sid])
+            _save_state_to_db(sessions[sid], db)
+            _persist_session_tracking(sessions[sid], db)
+
+            step, main_step = _ui_step_and_label("complete")
+            return ChatResponse(
+                message=assistant_text,
+                progress=100,
+                requires_upload=False,
+                stage="complete",
+                completed=True,
+                session_ended=False,
+                session_end_reason=None,
+                step=step,
+                current_main_step=main_step,
+                aml_status=sessions[sid].get("aml_status", "pending"),
+                aml_in_background=sessions[sid].get("aml_in_background", False),
+                fraud_status=sessions[sid].get("fraud_status"),
+                fraud_risk_score=sessions[sid].get("fraud_risk_score"),
+                fraud_signals=sessions[sid].get("fraud_signals", []),
+                fraud_reasoning=sessions[sid].get("fraud_reasoning"),
+                otp_required=False,
+            )
+
         # ── OTP verification intercept (no LLM needed) ──────────
         if state["stage"] == "otp_verification" and text:
             import re as _re
             import json as _json
             import uuid as _uuid
-            from datetime import datetime, timezone
+            from datetime import datetime as _otp_datetime, timezone as _otp_timezone
             from agents.decision.otp_service import (
                 verify_otp,
                 send_confirmation_email,
@@ -1099,7 +1295,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             full_name = state.get("full_name") or "User"
             email_id = state.get("email_id") or ""
             account_type = state.get("account_type") or "Savings"
-            now = datetime.now(timezone.utc)
+            now = _otp_datetime.now(_otp_timezone.utc)
             now_iso = now.isoformat() + "Z"
             now_display = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -1112,7 +1308,11 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 "type": "ACCOUNT_ACTIVATED",
                 "channel": "chatbot",
                 "payload": {
-                    "message": "Congratulations! 🎉\nYour Account has been Activated!\nThank You For Banking With Us!",
+                    "message": (
+                        "Congratulations! 🎉\n"
+                        "Your account has been activated successfully.\n"
+                        "Please ask any questions regarding the process."
+                    ),
                     "status": "ACTIVE",
                     "activatedAt": now_iso,
                     "account": {
@@ -1197,7 +1397,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         sessions[sid] = _trim_messages(new_state)
         if sessions[sid].get("stage") in {"complete", "rejected"}:
             sessions[sid]["progress"] = 100
-        sessions[sid]["metadata"] = {**(sessions[sid].get("metadata") or {}), "updated_at": _iso_now()}
+        sessions[sid]["metadata"] = {
+            **(sessions[sid].get("metadata") or {}),
+            "last_activity_at": (state.get("metadata") or {}).get("last_activity_at", _iso_now()),
+            "updated_at": _iso_now(),
+            "session_closed": False,
+        }
         await _save_session_cache(sid, sessions[sid])
         _start_aml_if_needed(sid)
         _save_state_to_db(sessions[sid], db)
@@ -1228,6 +1433,8 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             requires_upload=latest_state["requires_upload"],
             stage=stage,
             completed=stage == "complete",
+            session_ended=False,
+            session_end_reason=None,
             step=step,
             current_main_step=main_step,
             aml_status=latest_state.get("aml_status", "pending"),
