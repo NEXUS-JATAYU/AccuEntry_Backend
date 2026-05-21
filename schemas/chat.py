@@ -1,10 +1,26 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from core.security import sanitize_session_id, sanitize_user_input
+
 
 class ChatRequest(BaseModel):
     user_input: str = ""
     session_id: str | None = None
+
+    @field_validator("user_input")
+    @classmethod
+    def validate_user_input(cls, v: str) -> str:
+        return sanitize_user_input(v, field_name="user_input")
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        return sanitize_session_id(v) or None
+
 
 class ChatResponse(BaseModel):
     message: str
@@ -35,6 +51,11 @@ class SessionDetailsResponse(BaseModel):
 class SessionDetailsUpdateRequest(BaseModel):
     session_id: str
     details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, v: str) -> str:
+        return sanitize_session_id(v)
 
 
 class SessionDetailsUpdateResponse(BaseModel):

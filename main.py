@@ -24,13 +24,17 @@ from schemas.chat import (
     SessionDetailsUpdateRequest,
     SessionDetailsUpdateResponse,
 )
-from supervisor import onboarding_graph
 from state import OnboardingState
+from core.security import get_cors_middleware_kwargs, verify_api_key
+from services.agent_runner import (
+    agent_runtime_mode,
+    invoke_aml_graph,
+    invoke_faq_node,
+    invoke_onboarding_graph,
+)
 from sqlalchemy.orm import Session
 from core.database import engine, Base, get_db
 from core.http_client_pool import close_http_client, get_http_client
-from agents.aml.aml_screening import build_aml_graph
-from agents.faq.faq_agent import faq_node
 from agents.data_capture.data_capture_validators import (
     validate_name,
     validate_date,
@@ -84,18 +88,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:9000").rstrip("/")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
+app.add_middleware(CORSMiddleware, **get_cors_middleware_kwargs())
 
 sessions: dict[str, OnboardingState] = {}
 aml_tasks: dict[str, asyncio.Task] = {}
-aml_graph = build_aml_graph()
 agent_memory = AgentMemoryManager()
+logger.info("Agent runtime mode: %s", agent_runtime_mode())
 MAX_SESSION_MESSAGES = int(os.getenv("MAX_SESSION_MESSAGES", "120"))
 USE_REDIS_SESSIONS = os.getenv("USE_REDIS_SESSIONS", "true").lower() in {"1", "true", "yes"}
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
@@ -542,7 +540,7 @@ async def _run_aml_background(session_id: str) -> None:
             "messages": list(current["messages"]),
             "stage": "aml_screening",
         }
-        result = await aml_graph.ainvoke(aml_input, config={"recursion_limit": 50})
+        result = await invoke_aml_graph(aml_input)
 
         latest = sessions.get(session_id)
         if not latest:
@@ -1001,7 +999,11 @@ async def update_session_details(
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_endpoint(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_api_key),
+):
     try:
         sid = (request.session_id or "").strip() or str(uuid.uuid4())
         print(f"[DEBUG][chat] incoming sid={sid} user_input={request.user_input!r}")
@@ -1086,7 +1088,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 "messages": list(state.get("messages", [])) + [{"role": "user", "text": text}],
             }
             try:
-                faq_update = await faq_node(faq_state)
+                faq_update = await invoke_faq_node(faq_state)
                 assistant_messages = faq_update.get("messages") if isinstance(faq_update, dict) else []
                 assistant_text = ""
                 if assistant_messages:
@@ -1358,10 +1360,7 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         if text:
             state["messages"].append({"role": "user", "text": text})
 
-        new_state = await onboarding_graph.ainvoke(
-            state,
-            config={"recursion_limit": 50},
-        )
+        new_state = await invoke_onboarding_graph(state)
 
         # ── Reconcile AML background results ─────────────────────
         # The graph ran with a snapshot of the session. While it was
@@ -1701,8 +1700,12 @@ async def _post_to_accuverify(
     """Forward to AccuVerify; map connection errors to 503 instead of ASGI 500."""
     client = get_http_client()
     url = f"{ACCUVERIFY_URL}/{path.lstrip('/')}"
+    headers: dict[str, str] = {}
+    verify_key = os.getenv("VERIFY_SERVICE_API_KEY", "").strip()
+    if verify_key and path.lstrip("/").startswith("agent/"):
+        headers["X-Verify-Service-Key"] = verify_key
     try:
-        resp = await client.post(url, params=params, files=files, timeout=timeout)
+        resp = await client.post(url, params=params, files=files, timeout=timeout, headers=headers or None)
     except httpx.ConnectError as exc:
         logger.warning("AccuVerify unreachable at %s (%s)", url, exc)
         raise HTTPException(
