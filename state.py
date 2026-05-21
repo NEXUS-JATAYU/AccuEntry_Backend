@@ -118,3 +118,11 @@ class OnboardingState(TypedDict):
 
     # Under decision agent:
     decision_policy_excerpt: Optional[str]  # RAG excerpt attached to audit log
+
+    # ── Device / Bot / Behavioural signals ───────────────────
+    fingerprint_id: Optional[str]
+    fingerprint_flags: Optional[list[str]]
+    form_fill_seconds: Optional[float]
+    keystroke_entropy: Optional[float]
+    recaptcha_score: Optional[float]
+    typing_velocity: Optional[float]

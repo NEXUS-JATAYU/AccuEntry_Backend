@@ -246,6 +246,8 @@ def layer2_behavioural(state: OnboardingState) -> tuple[int, list[str]]:
       fingerprint_flags   : list  — e.g. ["headless", "vpn", "tor"]
       form_fill_seconds   : float — total time from page load to submission
       keystroke_entropy   : float — 0.0 (robotic) … 1.0 (natural)
+      recaptcha_score     : float — Google reCAPTCHA v3 score (0.0 to 1.0, where 0.0 is bot)
+      typing_velocity     : float — Keystrokes per second (cps)
     """
     signals: list[str] = []
     score = 0
@@ -272,6 +274,22 @@ def layer2_behavioural(state: OnboardingState) -> tuple[int, list[str]]:
     if 0.0 <= entropy < 0.2:
         signals.append(f"low_keystroke_entropy:{entropy:.2f}")
         score += 20
+        
+    recaptcha_score: float = state.get("recaptcha_score", -1.0)
+    if 0.0 <= recaptcha_score <= 0.3:
+        signals.append(f"low_recaptcha_score:{recaptcha_score:.2f}")
+        score += 35
+    elif 0.3 < recaptcha_score < 0.6:
+        signals.append(f"medium_recaptcha_score:{recaptcha_score:.2f}")
+        score += 15
+
+    typing_velocity: float = state.get("typing_velocity", -1.0)
+    if typing_velocity > 15.0:
+        signals.append(f"high_typing_velocity_bot:{typing_velocity:.1f}cps")
+        score += 30
+    elif typing_velocity > 10.0:
+        signals.append(f"fast_typing_velocity:{typing_velocity:.1f}cps")
+        score += 10
 
     return score, signals
 
