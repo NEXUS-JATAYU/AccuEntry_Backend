@@ -264,6 +264,14 @@ aml_db.risk_rules.insert_many([
         "risk_score_delta": 15,
         "active": True
     },
+    {
+        "rule_id": "SELF_DECLARED_PEP",
+        "description": "Applicant self-declared PEP or PEP-related status",
+        "check_type": "self_declared_pep",
+        "params": {},
+        "risk_score_delta": 35,
+        "active": True
+    },
 ])
 aml_db.risk_rules.create_index("rule_id", unique=True)
 aml_db.risk_rules.create_index("active")
