@@ -65,19 +65,23 @@ class OnboardingState(TypedDict):
     pan_verified: Optional[bool]
     aadhaar_verified: Optional[bool]
     face_verified: Optional[bool]
+    document_name: Optional[str]
+    document_dob: Optional[str]
+    document_address: Optional[str]
+    document_verified: Optional[bool]
 
     # ── KYC approval ─────────────────────────────────────────
     kyc_status: Optional[str]       # "approved" | "rejected"
 
     # ── AML screening ────────────────────────────────────────
-    aml_status: Optional[str]       # "pending" | "checking" | "clear" | "flagged"
+    aml_status: Optional[str]       # "pending" | "checking" | "clear" | "flagged" | "review"
     aml_raw_results: Optional[dict]  # raw output from all 4 tool calls
     aml_risk_score:  Optional[int]
     aml_in_background: bool
     aml_completed: bool
 
     # ── Fraud check ──────────────────────────────────────────
-    fraud_status: Optional[str]     # "clear" | "flagged"
+    fraud_status: Optional[str]     # clear | flagged | rejected | review | pending_aml | pending_aml_review
     fraud_risk_score: Optional[int]
     fraud_signals: list[str]
     fraud_reasoning: Optional[str]

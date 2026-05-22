@@ -20,7 +20,13 @@ class AgentMemoryManager:
 
     def __init__(self) -> None:
         self._store: list[dict[str, Any]] = []
-        self._chroma = ChromaMemoryBackend()
+        self._chroma = None
+
+    @property
+    def chroma(self) -> ChromaMemoryBackend:
+        if self._chroma is None:
+            self._chroma = ChromaMemoryBackend()
+        return self._chroma
 
     def store_interaction(
         self,
@@ -46,7 +52,7 @@ class AgentMemoryManager:
         }
         self._store.append(record)
 
-        ok = self._chroma.upsert_interaction(
+        ok = self.chroma.upsert_interaction(
             agent_name=agent_name,
             session_id=session_id,
             input_data=input_data,
@@ -67,7 +73,7 @@ class AgentMemoryManager:
         top_k: int = 3,
         where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        chroma_matches = self._chroma.query_similar(
+        chroma_matches = self.chroma.query_similar(
             agent_name=agent_name,
             query_data=query_data,
             top_k=top_k,
@@ -110,7 +116,7 @@ class AgentMemoryManager:
             "event_type": "feedback",
         }
         self._store.append(feedback_record)
-        self._chroma.upsert_feedback(
+        self.chroma.upsert_feedback(
             agent_name=agent_name,
             session_id=session_id,
             outcome=outcome,

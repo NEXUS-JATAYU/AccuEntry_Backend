@@ -2,11 +2,18 @@
 from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from rag_service import retrieve_as_context
+from rag_service import build_faq_retrieval_query, retrieve_as_context
 from state import OnboardingState
 from prompts import SYSTEM_PROMPT
 import os
 import re
+
+# Shown after decision/activation when the user may ask process questions via RAG.
+POST_PROCESS_FAQ_INVITE = (
+    "If you have any questions about this onboarding process, timelines, "
+    "KYC/AML checks, or required documents, type your question here and I will "
+    "answer from our policy guide."
+)
 
 # _FAQ_SYSTEM = """
 # You are a helpful onboarding assistant for AccuEntry bank.
@@ -50,7 +57,13 @@ async def faq_node(state: OnboardingState) -> dict:
     if not user_text:
         return {}
 
-    policy_chunks = retrieve_as_context(user_text, top_k=4)
+    rag_query = build_faq_retrieval_query(
+        user_text,
+        stage=state.get("stage"),
+        decision_action=state.get("decision_action"),
+        aml_status=state.get("aml_status"),
+    )
+    policy_chunks = retrieve_as_context(rag_query, top_k=4)
     if not policy_chunks:
         return {
             "messages": [{
