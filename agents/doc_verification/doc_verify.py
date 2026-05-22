@@ -4,6 +4,7 @@ Document verification subgraph: prompt uploads, poll AccuVerify KYC status, hand
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -17,6 +18,7 @@ from state import OnboardingState
 
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:9000")
 _memory = AgentMemoryManager()
+logger = logging.getLogger(__name__)
 
 
 def _store_doc_verify_memory(
@@ -87,12 +89,18 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
         resp = await client.get(url, params={"user_id": state["session_id"]})
         resp.raise_for_status()
         data = resp.json()
-    except (httpx.HTTPError, ValueError):
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "AccuVerify kyc/status unreachable session=%s url=%s err=%s",
+            state.get("session_id"),
+            url,
+            exc,
+        )
         _store_doc_verify_memory(
             state,
             status="verify_service_unavailable",
             outcome_stage=state.get("stage") or "doc_verification",
-            verify_payload={},
+            verify_payload={"error": str(exc)},
         )
         base["messages"] = [
             {
@@ -104,6 +112,26 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             }
         ]
         return base
+    except ValueError as exc:
+        logger.warning(
+            "AccuVerify kyc/status invalid JSON session=%s err=%s",
+            state.get("session_id"),
+            exc,
+        )
+        base["messages"] = [
+            {
+                "role": "assistant",
+                "text": (
+                    "We could not read the verification status. "
+                    "Please try again in a moment."
+                ),
+            }
+        ]
+        return base
+
+    if not isinstance(data, dict):
+        logger.warning("AccuVerify kyc/status unexpected payload session=%s", state.get("session_id"))
+        data = {}
 
     pan_v = bool(data.get("pan_verified"))
     aadhaar_v = bool(data.get("aadhaar_verified"))
@@ -120,8 +148,12 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
             "aadhaar_verified": aadhaar_v,
             "face_verified": face_v,
             "video_kyc_status": "verified" if video_kyc_v else ("failed" if video_kyc_failed else "pending"),
+            "document_verified": pan_v and aadhaar_v and face_v,
         }
     )
+    for doc_key in ("document_name", "document_dob", "document_address"):
+        if doc_key in data:
+            base[doc_key] = data.get(doc_key)
 
     if pan_v and aadhaar_v and face_v and video_kyc_v:
         _store_doc_verify_memory(

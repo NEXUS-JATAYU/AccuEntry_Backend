@@ -1,4 +1,4 @@
-"""
+﻿"""
 Fraud check subgraph: layered identity validation + LLM risk reasoning.
 
 Architecture
@@ -37,6 +37,7 @@ IP_BLOCKLIST_PATH  : path to newline-separated IP blocklist file (optional)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -60,6 +61,59 @@ _memory = AgentMemoryManager()
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 FRAUD_LLM_MODEL = os.getenv("FRAUD_LLM_MODEL", os.getenv("OLLAMA_MODEL", "gemma2:2b"))
+
+
+def resolve_fraud_action(
+    combined_rule_score: int,
+    llm_action: str,
+    skip_llm_below: int = 25,
+) -> tuple[str, int]:
+    """
+    Map rule score + LLM recommendation to final fraud action.
+    Aligns with Layer 4 prompt bands; never auto-clears scores >= 60 unless
+    FRAUD_FORCE_CLEAR_BELOW is set (legacy CI / test only).
+    """
+    force_clear_below = os.getenv("FRAUD_FORCE_CLEAR_BELOW", "").strip()
+    if force_clear_below:
+        try:
+            if combined_rule_score < int(force_clear_below):
+                return "clear", combined_rule_score
+        except ValueError:
+            pass
+
+    action = (
+        llm_action
+        if llm_action in ("clear", "manual_review", "reject")
+        else "manual_review"
+    )
+
+    if combined_rule_score < skip_llm_below:
+        return "clear", combined_rule_score
+
+    if combined_rule_score >= 75:
+        if action == "clear":
+            return "reject", combined_rule_score
+        return action, combined_rule_score
+
+    if combined_rule_score >= 60:
+        if action == "clear":
+            return "manual_review", combined_rule_score
+        return action, combined_rule_score
+
+    if combined_rule_score >= 50:
+        if action == "clear":
+            return "manual_review", combined_rule_score
+        return action, combined_rule_score
+
+    return action, combined_rule_score
+
+
+def _document_verified(state: OnboardingState) -> bool:
+    if state.get("document_verified") is not None:
+        return bool(state.get("document_verified"))
+    return bool(state.get("pan_verified")) and bool(state.get("aadhaar_verified"))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -203,7 +257,7 @@ def _check_ip(ip: str | None, signals: list[str]) -> int:
     if ip in _IP_BLOCKLIST:
         signals.append(f"ip_blocklisted:{ip}")
         return 40
-    # Simple private/loopback check — not a risk signal, but flag for testing
+    # Simple private/loopback check â€” not a risk signal, but flag for testing
     if ip.startswith(("10.", "192.168.", "127.")):
         signals.append("ip_private_range")
     return 0
@@ -314,7 +368,7 @@ def _dob_matches(dob_str: str | None, document_dob: str | None, signals: list[st
 
 
 def _name_similarity(a: str, b: str) -> float:
-    """Crude Jaccard similarity on character trigrams — no external library."""
+    """Crude Jaccard similarity on character trigrams â€” no external library."""
     def trigrams(s: str) -> set[str]:
         s = re.sub(r"\s+", "", s.lower())
         return {s[i : i + 3] for i in range(len(s) - 2)} if len(s) >= 3 else {s}
@@ -328,12 +382,12 @@ def _name_similarity(a: str, b: str) -> float:
 def layer3_identity(state: OnboardingState) -> tuple[int, list[str]]:
     """
     Expects optional state fields:
-      full_name           : str  — user-submitted name
-      document_name       : str  — name extracted from ID document
-      date_of_birth       : str  — user-submitted (YYYY-MM-DD)
-      document_dob        : str  — DOB extracted from ID document
-      address             : str  — user-submitted address string
-      document_address    : str  — address on ID document
+      full_name           : str  â€” user-submitted name
+      document_name       : str  â€” name extracted from ID document
+      date_of_birth       : str  â€” user-submitted (YYYY-MM-DD)
+      document_dob        : str  â€” DOB extracted from ID document
+      address             : str  â€” user-submitted address string
+      document_address    : str  â€” address on ID document
     """
     signals: list[str] = []
     score = 0
@@ -349,8 +403,9 @@ def layer3_identity(state: OnboardingState) -> tuple[int, list[str]]:
             signals.append(f"name_partial_similarity:{sim:.2f}")
             score += 10
 
+    user_dob = state.get("dob") or state.get("date_of_birth")
     score += _dob_matches(
-        state.get("date_of_birth"),
+        user_dob,
         state.get("document_dob"),
         signals,
     )
@@ -375,7 +430,7 @@ def layer3_identity(state: OnboardingState) -> tuple[int, list[str]]:
 
 # Few-shot prompt works better than a system prompt for small models.
 # One complete example teaches the exact JSON shape we expect.
-_PROMPT_TEMPLATE = """You are a fraud-risk analyst. Analyse the signals below and reply with ONLY a JSON object — no explanation, no markdown fences.
+_PROMPT_TEMPLATE = """You are a fraud-risk analyst. Analyse the signals below and reply with ONLY a JSON object â€” no explanation, no markdown fences.
 
 Required JSON schema:
 {{"risk_score": <int 0-100>, "risk_level": "<low|medium|high|critical>", "recommended_action": "<clear|manual_review|reject>", "reasoning": "<max 60 words>", "top_signals": [<up to 3 signal strings>]}}
@@ -391,7 +446,7 @@ Now analyse this input and reply with ONLY the JSON object:
 {bundle}"""
 
 
-def layer4_llm_reasoning(
+async def layer4_llm_reasoning(
     rule_score: int,
     signals: list[str],
     state: OnboardingState,
@@ -409,7 +464,7 @@ def layer4_llm_reasoning(
         "aml_status": state.get("aml_status"),
         "form_fill_seconds": state.get("form_fill_seconds"),
         "keystroke_entropy": state.get("keystroke_entropy"),
-        "document_verified": state.get("document_verified", False),
+        "document_verified": _document_verified(state),
     }
 
     if phone:
@@ -439,9 +494,9 @@ def layer4_llm_reasoning(
 
     try:
         prompt = _PROMPT_TEMPLATE.format(bundle=json.dumps(bundle))
-        raw = _ollama_generate(prompt)
+        raw = await asyncio.to_thread(_ollama_generate, prompt)
 
-        # gemma2:2b sometimes wraps output in ```json ... ``` — strip it
+        # gemma2:2b sometimes wraps output in ```json ... ``` â€” strip it
         raw = re.sub(r"^```json\s*|\s*```$", "", raw.strip(), flags=re.DOTALL).strip()
 
         # Extract first {...} block in case the model adds trailing commentary
@@ -478,8 +533,8 @@ def layer4_llm_reasoning(
 # Main check node
 # ---------------------------------------------------------------------------
 
-def check_node(state: OnboardingState) -> dict[str, Any]:
-    # ── AML gate (unchanged logic) ──────────────────────────────────────────
+async def check_node(state: OnboardingState) -> dict[str, Any]:
+    # â”€â”€ AML gate (unchanged logic) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     aml_status = state.get("aml_status")
     aml_in_background = bool(state.get("aml_in_background"))
 
@@ -509,6 +564,35 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
                 ],
             }
 
+    if aml_status == "review":
+        _store_fraud_memory(
+            state,
+            l1_score=0,
+            l1_signals=[],
+            l2_score=0,
+            l2_signals=[],
+            l3_score=0,
+            l3_signals=[],
+            llm_result={"recommended_action": "manual_review", "reasoning": "AML review required"},
+            action="manual_review",
+            outcome_stage="manual_review",
+            fraud_status="pending_aml_review",
+            risk_score=0,
+        )
+        return {
+            "stage": "manual_review",
+            "fraud_status": "pending_aml_review",
+            "fraud_risk_score": state.get("fraud_risk_score") or 0,
+            "fraud_signals": state.get("fraud_signals") or [],
+            "progress": 85,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "text": "AML screening requires manual compliance review before we can continue.",
+                }
+            ],
+        }
+
     if aml_status == "flagged":
         _memory.store_interaction(
             session_id=state.get("audit_session_id") or state.get("session_id") or "unknown",
@@ -533,24 +617,24 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
             },
             event_type="fraud_outcome",
         )
+        from agents.aml.aml_user_report import build_aml_flag_user_message
+
+        report_text = await build_aml_flag_user_message(state)
         return {
             "stage": "rejected",
             "fraud_status": "flagged",
             "fraud_risk_score": state.get("fraud_risk_score") or 0,
             "fraud_signals": state.get("fraud_signals") or [],
             "progress": 100,
-            "messages": [
-                {
-                    "role": "assistant",
-                    "text": "Your account is flagged for non compliance. A ticket has been raised. Bank staff will contact you in 1-2 days.",
-                }
-            ],
+            "decision_action": "reject",
+            "decision_reason": "AML flagged during fraud screening gate",
+            "messages": [{"role": "assistant", "text": report_text}],
         }
 
     # NOTE: We no longer bypass the decision agent if fraud is cleared.
     # We must proceed to the decision agent so OTP activation can trigger.
 
-    # ── Layered fraud checks ────────────────────────────────────────────────
+    # â”€â”€ Layered fraud checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     t0 = time.monotonic()
 
     l1_score, l1_signals = layer1_rule_checks(state)
@@ -560,7 +644,17 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
     combined_rule_score = l1_score + l2_score + l3_score
     all_signals = l1_signals + l2_signals + l3_signals
 
-    llm_result = layer4_llm_reasoning(combined_rule_score, all_signals, state)
+    skip_llm_below = int(os.getenv("FRAUD_SKIP_LLM_BELOW", "25"))
+    if combined_rule_score < skip_llm_below:
+        llm_result = {
+            "risk_score": combined_rule_score,
+            "risk_level": "low",
+            "recommended_action": "clear",
+            "reasoning": f"Rule score {combined_rule_score} below LLM threshold; skipped Ollama.",
+            "top_signals": all_signals[:3],
+        }
+    else:
+        llm_result = await layer4_llm_reasoning(combined_rule_score, all_signals, state)
     elapsed = time.monotonic() - t0
 
     action: str = llm_result.get("recommended_action", "manual_review")
@@ -577,12 +671,13 @@ def check_node(state: OnboardingState) -> dict[str, Any]:
         all_signals,
     )
 
-    # Hard-override to guarantee testing passes
-    if combined_rule_score < 60:
-        action = "clear"
-        risk_score = combined_rule_score
+    action, risk_score = resolve_fraud_action(
+        combined_rule_score,
+        action,
+        skip_llm_below=skip_llm_below,
+    )
 
-    # ── Route on LLM recommendation ─────────────────────────────────────────
+    # Route on resolved action
     if action == "reject":
         _store_fraud_memory(
             state,

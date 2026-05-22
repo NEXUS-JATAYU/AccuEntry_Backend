@@ -20,7 +20,7 @@ USE_AGENT_MICROSERVICE = os.getenv("USE_AGENT_MICROSERVICE", "false").lower() in
     "1",
     "true",
     "yes",
-} or bool(AGENT_SERVICE_URL)
+}
 
 _RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "50"))
 

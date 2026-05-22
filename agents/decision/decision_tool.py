@@ -24,14 +24,54 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+import os
 from rag_service import retrieve_as_context
 from audit_logger import AuditLogger
 from llm_config import AgentLLM
 from memory_manager import AgentMemoryManager
 from agents.decision.activation_service import send_activation_email
+from agents.faq.faq_agent import POST_PROCESS_FAQ_INVITE
 from state import OnboardingState
 
 logger = logging.getLogger(__name__)
+
+# Fraud statuses that must never receive account approval
+_FRAUD_BLOCKING = frozenset({
+    "flagged",
+    "rejected",
+    "review",
+    "pending_aml",
+    "pending_aml_review",
+})
+
+# Terminal stages where users may ask process questions (RAG FAQ in /chat).
+_FAQ_INVITE_STAGES = frozenset({
+    "manual_review",
+    "rejected",
+    "escalated",
+    "pending_docs",
+    "complete",
+})
+
+
+def _append_faq_invite(messages: list[dict]) -> list[dict]:
+    """Append post-process FAQ invite to the last plain-text assistant message."""
+    if not messages:
+        return [{"role": "assistant", "text": POST_PROCESS_FAQ_INVITE}]
+    updated = list(messages)
+    last = updated[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        updated.append({"role": "assistant", "text": POST_PROCESS_FAQ_INVITE})
+        return updated
+    if last.get("type") in {"OTP_REQUESTED", "ACCOUNT_ACTIVATED"} or isinstance(
+        last.get("payload"), dict
+    ):
+        updated.append({"role": "assistant", "text": POST_PROCESS_FAQ_INVITE})
+        return updated
+    text = str(last.get("text") or "").strip()
+    if POST_PROCESS_FAQ_INVITE not in text:
+        updated[-1] = {**last, "text": f"{text}\n\n{POST_PROCESS_FAQ_INVITE}".strip()}
+    return updated
 
 # Shared instances
 _audit = AuditLogger()
@@ -170,24 +210,30 @@ Decision rules (follow strictly):
      → reject_application
 
   3. If fraud_score <= 59 AND aml_status = "clear"
+     AND aml_completed = true
+     AND fraud_status NOT in ("flagged", "rejected", "review",
+         "pending_aml", "pending_aml_review")
      → approve_account
 
-  4. If fraud_score <= 59 AND aml_status in
-     ("checking", "pending", "pending_aml", null, None)
-     → approve_account
-     (AML still processing but fraud risk is low — safe to proceed)
+  4. If aml_status in ("checking", "pending", "pending_aml", null, None)
+     OR aml_completed = false
+     → queue_for_review with priority "normal"
+     (Never approve while AML is incomplete)
 
-  5. If fraud_score >= 60 AND fraud_score < 80
+  5. If aml_status = "review"
+     → queue_for_review with priority "urgent"
+
+  6. If fraud_score >= 60 AND fraud_score < 80
      → queue_for_review with priority "normal"
 
-  6. If fraud_score >= 80
+  7. If fraud_score >= 80
      → reject_application
 
-  7. If source_of_funds = "cryptocurrency" or "cash"
+  8. If source_of_funds = "cryptocurrency" or "cash"
      AND annual_income > 1000000
      → queue_for_review with priority "urgent"
 
-  8. If any field is null, missing, or not yet collected
+  9. If any field is null, missing, or not yet collected
      → assume lowest risk for that field only
      → do NOT escalate, reject, or request docs
         due to a missing field alone
@@ -204,6 +250,33 @@ respond ONLY with the JSON output of the tool — no additional text.
 # ---------------------------------------------------------------------------
 
 
+def _decision_rag_query(state: OnboardingState, fraud_score: int, aml_status: str | None) -> str:
+    """Risk-aware retrieval query for decision LLM policy context."""
+    aml = (aml_status or "").lower()
+    if aml == "flagged":
+        return "AML flagged escalation compliance sanctions"
+    if aml == "review":
+        return "AML manual review compliance timeline urgent queue"
+    if aml in {"pending", "checking"} or not state.get("aml_completed"):
+        return "AML screening in progress pending completion"
+    if fraud_score >= 80:
+        return "fraud rejection criteria critical risk score"
+    if fraud_score >= 60:
+        return "fraud manual review elevated risk score queue"
+    return "account approval criteria low risk KYC AML clear"
+
+
+def _aml_triggered_rules(state: OnboardingState, limit: int = 5) -> list[str]:
+    raw = state.get("aml_raw_results") or {}
+    rules = raw.get("rules") if isinstance(raw, dict) else None
+    if not isinstance(rules, dict):
+        return []
+    triggered = rules.get("triggered") or rules.get("triggered_rules") or []
+    if isinstance(triggered, list):
+        return [str(r) for r in triggered[:limit]]
+    return []
+
+
 def _build_decision_context(state: OnboardingState) -> str:
     fraud_score = state.get("fraud_risk_score") or 0
     kyc_data: dict = state.get("kyc_data") or {}
@@ -213,6 +286,9 @@ def _build_decision_context(state: OnboardingState) -> str:
         "fraud_score": fraud_score,
         "fraud_flags": (state.get("fraud_signals") or [])[:5],
         "aml_status": state.get("aml_status"),
+        "aml_risk_score": state.get("aml_risk_score"),
+        "aml_completed": state.get("aml_completed"),
+        "aml_triggered_rules": _aml_triggered_rules(state),
         # "risk_model_label": state.get("risk_model_label"),  # TODO: not yet implemented — risk_analysis
         # "risk_model_confidence": state.get("risk_model_confidence"),  # TODO: not yet implemented — risk_analysis
         # "video_kyc_status": state.get("video_kyc_status"),  # TODO: not yet implemented — video_kyc
@@ -222,17 +298,15 @@ def _build_decision_context(state: OnboardingState) -> str:
         "audit_session_id": state.get("audit_session_id"),
     }
 
-    #RAG
-    fraud_score = context.get("fraud_score", 0)
-    aml_status = context.get("aml_status", "")
-    if aml_status == "flagged":
-        rag_query = "KYC re-verification requirements AML escalation"
-    elif fraud_score >= 60:
-        rag_query = "rejection criteria high fraud risk score"
-    else:
-        rag_query = "account approval criteria low risk"
-    
-    policy_excerpt = retrieve_as_context(rag_query, top_k=3)
+    use_rag = os.getenv("DECISION_USE_RAG", "true").lower() in {"1", "true", "yes"}
+    policy_excerpt = (
+        retrieve_as_context(
+            _decision_rag_query(state, fraud_score, context.get("aml_status")),
+            top_k=3,
+        )
+        if use_rag
+        else ""
+    )
 
     similar = _memory.retrieve_similar(
         "decision_agent",
@@ -245,11 +319,12 @@ def _build_decision_context(state: OnboardingState) -> str:
     for key, val in context.items():
         lines.append(f"  {key}: {val}")
 
+    if policy_excerpt:
+        lines.append("\nRelevant policy excerpt:")
+        lines.append(policy_excerpt)
+
     if similar:
         lines.append("\nSimilar past cases:")
-        if policy_excerpt:
-            lines.append("\nRelevant policy excerpt:")
-            lines.append(policy_excerpt)
         for i, case in enumerate(similar, 1):
             out = case.get("output_data", {})
             lines.append(
@@ -264,7 +339,92 @@ def _is_low_risk_approval_candidate(state: OnboardingState) -> bool:
     aml_status = (state.get("aml_status") or "").lower()
     fraud_status = (state.get("fraud_status") or "").lower()
     fraud_score = state.get("fraud_risk_score") or 0
-    return aml_status == "clear" and fraud_status == "clear" and fraud_score <= 59
+    return (
+        aml_status == "clear"
+        and state.get("aml_completed")
+        and fraud_status not in _FRAUD_BLOCKING
+        and fraud_score <= 59
+    )
+
+
+def resolve_deterministic_decision(state: OnboardingState) -> dict[str, Any] | None:
+    """
+    Apply deterministic decision rules (same precedence as _run_decision_agent).
+    Returns tool result dict or None when LLM path should run.
+    """
+    session_id = state.get("audit_session_id") or state.get("session_id") or "unknown"
+    fraud_score = state.get("fraud_risk_score") or 0
+    aml_status = state.get("aml_status")
+    fraud_status = (state.get("fraud_status") or "").lower()
+    kyc_data: dict[str, Any] = state.get("kyc_data") or {}
+    source_of_funds = (
+        kyc_data.get("source_of_funds") or state.get("source_of_funds") or ""
+    ).strip().lower()
+    annual_income_raw = kyc_data.get("annual_income") or state.get("annual_income")
+    try:
+        annual_income = (
+            float(annual_income_raw) if annual_income_raw not in (None, "") else 0.0
+        )
+    except (TypeError, ValueError):
+        annual_income = 0.0
+
+    if aml_status == "flagged":
+        return escalate_to_compliance.invoke({
+            "session_id": session_id,
+            "reason": "AML flagged; escalated to compliance.",
+            "severity": "high",
+        })
+    if aml_status == "review":
+        return queue_for_review.invoke({
+            "session_id": session_id,
+            "reason": "AML elevated risk requires compliance review.",
+            "priority": "urgent",
+        })
+    if fraud_status in {"flagged", "rejected"} and fraud_score >= 60:
+        return reject_application.invoke({
+            "session_id": session_id,
+            "reason": "Fraud flagged with high risk score.",
+        })
+    if fraud_score >= 80:
+        return reject_application.invoke({
+            "session_id": session_id,
+            "reason": "Fraud risk score is critical.",
+        })
+    if source_of_funds in {"cryptocurrency", "cash"} and annual_income > 1_000_000:
+        return queue_for_review.invoke({
+            "session_id": session_id,
+            "reason": "High-income cash/crypto source requires manual review.",
+            "priority": "urgent",
+        })
+    if fraud_score >= 60:
+        return queue_for_review.invoke({
+            "session_id": session_id,
+            "reason": "Fraud risk score is elevated and needs manual review.",
+            "priority": "normal",
+        })
+    if (
+        fraud_score <= 59
+        and aml_status == "clear"
+        and state.get("aml_completed")
+        and fraud_status not in _FRAUD_BLOCKING
+    ):
+        return approve_account.invoke({
+            "session_id": session_id,
+            "reason": "Low fraud risk and AML clear; proceed to activation.",
+        })
+    if aml_status in {"pending", "checking"} or not state.get("aml_completed"):
+        return queue_for_review.invoke({
+            "session_id": session_id,
+            "reason": "AML screening still in progress.",
+            "priority": "normal",
+        })
+    if state.get("doc_failure_type"):
+        return request_additional_docs.invoke({
+            "session_id": session_id,
+            "reason": "Document verification requires resubmission.",
+            "doc_list": ["pan", "aadhaar", "selfie"],
+        })
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -331,71 +491,22 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
 
     # 2. Deterministic rule gate to avoid low-risk regressions.
     # Keep LLM as secondary for ambiguous cases only.
-    deterministic_result: dict[str, Any] | None = None
-    kyc_data: dict[str, Any] = state.get("kyc_data") or {}
-    source_of_funds = (kyc_data.get("source_of_funds") or state.get("source_of_funds") or "").strip().lower()
-    annual_income_raw = kyc_data.get("annual_income") or state.get("annual_income")
-    try:
-        annual_income = float(annual_income_raw) if annual_income_raw not in (None, "") else 0.0
-    except (TypeError, ValueError):
-        annual_income = 0.0
-
-    # Deterministic decision rules — follow system prompt exactly.
-    # Check blocking conditions first, then approvals, then queues.
-    
-    if aml_status == "flagged":
-        deterministic_result = escalate_to_compliance.invoke({
-            "session_id": session_id,
-            "reason": "AML flagged; escalated to compliance.",
-            "severity": "high",
-        })
-    elif fraud_status in {"flagged", "rejected"} and fraud_score >= 60:
-        deterministic_result = reject_application.invoke({
-            "session_id": session_id,
-            "reason": "Fraud flagged with high risk score.",
-        })
-    elif fraud_score >= 80:
-        deterministic_result = reject_application.invoke({
-            "session_id": session_id,
-            "reason": "Fraud risk score is critical.",
-        })
-    elif source_of_funds in {"cryptocurrency", "cash"} and annual_income > 1_000_000:
-        deterministic_result = queue_for_review.invoke({
-            "session_id": session_id,
-            "reason": "High-income cash/crypto source requires manual review.",
-            "priority": "urgent",
-        })
-    elif fraud_score >= 60:
-        # Rule 5: fraud_score >= 60 AND < 80 → queue_for_review
-        deterministic_result = queue_for_review.invoke({
-            "session_id": session_id,
-            "reason": "Fraud risk score is elevated and needs manual review.",
-            "priority": "normal",
-        })
-    elif fraud_score <= 59 and aml_status == "clear" and fraud_status == "clear":
-        # Rule 3: fraud_score <= 59 AND aml_status="clear" → approve_account
-        # Explicit fraud_status check to ensure both checks are truly complete.
-        deterministic_result = approve_account.invoke({
-            "session_id": session_id,
-            "reason": "Low fraud risk and no AML flag.",
-        })
+    deterministic_result = resolve_deterministic_decision(state)
 
     decision_source = "llm"
+    tool_result = None
     if deterministic_result is not None:
-        print(
-            f"[DEBUG][decision] deterministic_action={deterministic_result.get('action')} "
-            f"stage={deterministic_result.get('stage')} session={session_id}"
-        )
         tool_result = deterministic_result
         decision_source = "deterministic"
 
-    # 3. Build context
-    context_string = _build_decision_context(state)
+    context_string = ""
+    llm_with_tools = None
+    if tool_result is None:
+        context_string = _build_decision_context(state)
+        llm = AgentLLM().get_llm("decision_agent")
+        llm_with_tools = llm.bind_tools(ALL_DECISION_TOOLS, tool_choice="required")
 
-    # 4. Bind tools to LLM
-    llm = AgentLLM().get_llm("decision_agent")
-    llm_with_tools = llm.bind_tools(ALL_DECISION_TOOLS, tool_choice="required")
-
+    # 4. Bind tools to LLM (when LLM path)
     # 5. Agentic loop (max 3 iterations)
     messages: list = [
         SystemMessage(content=DECISION_AGENT_SYSTEM_PROMPT),
@@ -491,7 +602,12 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
         })
 
     if tool_result.get("action") == "approve":
-        if aml_status != "clear" or (state.get("fraud_status") or "").lower() != "clear":
+        fraud_status_lower = (state.get("fraud_status") or "").lower()
+        if (
+            aml_status != "clear"
+            or not state.get("aml_completed")
+            or fraud_status_lower in _FRAUD_BLOCKING
+        ):
             print(
                 f"[DEBUG][decision] approve_blocked_pending_checks session={session_id} "
                 f"aml_status={aml_status} fraud_status={state.get('fraud_status')}"
@@ -620,6 +736,14 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
                         },
                     }
 
+    if (aml_status or "").lower() == "flagged" and tool_result.get("action") in {
+        "reject",
+        "escalate",
+    }:
+        from agents.aml.aml_user_report import build_aml_flag_user_message
+
+        tool_result["user_message"] = await build_aml_flag_user_message(state)
+
     user_message = tool_result.get("user_message")
     if isinstance(user_message, dict):
         payload = user_message.get("payload") or {}
@@ -661,6 +785,9 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
     if "pending_docs" in tool_result:
         update["pending_docs"] = tool_result["pending_docs"]
 
+    if stage in _FAQ_INVITE_STAGES:
+        update["messages"] = _append_faq_invite(update.get("messages") or [])
+
     # 6. Store interaction in memory
     _memory.store_interaction(
         session_id=session_id,
@@ -697,7 +824,10 @@ async def _run_decision_agent(state: OnboardingState) -> dict[str, Any]:
             "action": decision_action,
             "stage": stage,
             "reason": decision_reason,
-            "policy_excerpt": retrieve_as_context(f"rejection criteria for {decision_action}", top_k=2),
+            "policy_excerpt": retrieve_as_context(
+                _decision_rag_query(state, fraud_score, aml_status),
+                top_k=2,
+            ),
         },
         decision=decision_action,
         metadata={

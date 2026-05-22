@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import asyncio
 import json
@@ -6,6 +6,7 @@ import uuid
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -25,13 +26,39 @@ from schemas.chat import (
     SessionDetailsUpdateResponse,
 )
 from state import OnboardingState
-from core.security import get_cors_middleware_kwargs, verify_api_key
+from core.security import (
+    enforce_upload_size,
+    get_cors_middleware_kwargs,
+    sanitize_session_id,
+    verify_api_key,
+    verify_hitl_api_key,
+)
 from services.agent_runner import (
     agent_runtime_mode,
     invoke_aml_graph,
     invoke_faq_node,
     invoke_onboarding_graph,
 )
+from agents.faq.faq_agent import POST_PROCESS_FAQ_INVITE
+
+# Stages where /chat routes user questions to RAG FAQ (post-decision / terminal).
+FAQ_RAG_STAGES = frozenset({
+    "complete",
+    "manual_review",
+    "rejected",
+    "escalated",
+    "pending_docs",
+})
+
+
+def _faq_eligible(state: OnboardingState) -> bool:
+    """RAG FAQ for terminal outcomes and anyone with a completed AML flag."""
+    stage = state.get("stage") or ""
+    if stage in FAQ_RAG_STAGES:
+        return True
+    if (state.get("aml_status") or "").lower() == "flagged" and state.get("aml_completed"):
+        return True
+    return False
 from sqlalchemy.orm import Session
 from core.database import engine, Base, get_db
 from core.http_client_pool import close_http_client, get_http_client
@@ -322,6 +349,10 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "pan_verified": None,
         "aadhaar_verified": None,
         "face_verified": None,
+        "document_name": None,
+        "document_dob": None,
+        "document_address": None,
+        "document_verified": None,
         "kyc_status": None,
         "aml_status": "pending",
         "aml_raw_results": None,
@@ -349,9 +380,9 @@ def _initial_onboarding_state(session_id: str) -> OnboardingState:
         "admin_override": False,
         "audit_session_id": str(_uuid.uuid4()),
         # Upstream signal fields for decision agent
-        "video_kyc_status": None,  # TODO: not yet implemented — video_kyc
-        "risk_model_label": None,  # TODO: not yet implemented — risk_analysis
-        "risk_model_confidence": None,  # TODO: not yet implemented — risk_analysis
+        "video_kyc_status": None,  # TODO: not yet implemented â€” video_kyc
+        "risk_model_label": None,  # TODO: not yet implemented â€” risk_analysis
+        "risk_model_confidence": None,  # TODO: not yet implemented â€” risk_analysis
         "kyc_data": None,
     }
 
@@ -369,15 +400,19 @@ def _details_payload_from_state(state: OnboardingState) -> dict[str, str | None]
 
 
 async def _ensure_session_state(session_id: str) -> OnboardingState:
-    if session_id in sessions:
-        return sessions[session_id]
-
+    session_id = sanitize_session_id(session_id)
     cached = await _load_session_cache(session_id)
     if cached is not None:
         sessions[session_id] = cached
         return sessions[session_id]
-
+    if session_id in sessions:
+        return sessions[session_id]
     raise HTTPException(status_code=404, detail="Session not found")
+
+
+async def _commit_session(session_id: str, state: OnboardingState) -> None:
+    sessions[session_id] = state
+    await _save_session_cache(session_id, state)
 
 
 def _validate_details_field(field: str, value: object) -> tuple[bool, str]:
@@ -566,7 +601,7 @@ async def _run_aml_background(session_id: str) -> None:
             "stage": result.get("stage", latest_stage) if can_apply_aml_stage else latest_stage,
             "messages": latest.get("messages", []) + aml_appended_messages,
             "aml_in_background": False,
-            "aml_completed": resolved_aml_status in ("clear", "flagged"),
+            "aml_completed": resolved_aml_status in ("clear", "flagged", "review"),
             "metadata": {**(latest.get("metadata") or {}), "updated_at": _iso_now()},
         }
 
@@ -1080,9 +1115,8 @@ async def chat_endpoint(
                 otp_required=stage == "otp_verification",
             )
 
-        # Post-activation FAQ mode: once onboarding is complete, let the user
-        # ask follow-up questions through the RAG FAQ service.
-        if state.get("stage") == "complete" and text:
+        # Post-decision FAQ mode: terminal / AML-flagged users ask process questions via RAG.
+        if _faq_eligible(state) and text:
             faq_state: OnboardingState = {
                 **state,
                 "messages": list(state.get("messages", [])) + [{"role": "user", "text": text}],
@@ -1116,13 +1150,19 @@ async def chat_endpoint(
             _save_state_to_db(sessions[sid], db)
             _persist_session_tracking(sessions[sid], db)
 
-            step, main_step = _ui_step_and_label("complete")
+            faq_stage = sessions[sid].get("stage") or "complete"
+            step, main_step = _ui_step_and_label(faq_stage)
+            faq_progress = (
+                100
+                if faq_stage in {"complete", "rejected"}
+                else int(sessions[sid].get("progress") or 85)
+            )
             return ChatResponse(
                 message=assistant_text,
-                progress=100,
+                progress=faq_progress,
                 requires_upload=False,
-                stage="complete",
-                completed=True,
+                stage=faq_stage,
+                completed=faq_stage == "complete",
                 session_ended=False,
                 session_end_reason=None,
                 step=step,
@@ -1136,7 +1176,7 @@ async def chat_endpoint(
                 otp_required=False,
             )
 
-        # ── OTP verification intercept (no LLM needed) ──────────
+        # â”€â”€ OTP verification intercept (no LLM needed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if state["stage"] == "otp_verification" and text:
             import re as _re
             import json as _json
@@ -1292,7 +1332,7 @@ async def chat_endpoint(
                     otp_required=not is_otp_locked(otp_session_id),
                 )
 
-            # ── OTP Success: Activate account ──────────────────
+            # â”€â”€ OTP Success: Activate account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             account_id = f"ACC-{_uuid.uuid4().hex[:8].upper()}"
             full_name = state.get("full_name") or "User"
             email_id = state.get("email_id") or ""
@@ -1311,9 +1351,8 @@ async def chat_endpoint(
                 "channel": "chatbot",
                 "payload": {
                     "message": (
-                        "Congratulations! 🎉\n"
-                        "Your account has been activated successfully.\n"
-                        "Please ask any questions regarding the process."
+                        "Congratulations! Your account has been activated successfully.\n"
+                        f"{POST_PROCESS_FAQ_INVITE}"
                     ),
                     "status": "ACTIVE",
                     "activatedAt": now_iso,
@@ -1356,13 +1395,13 @@ async def chat_endpoint(
                 otp_required=False,
             )
 
-        # ── Normal graph flow ───────────────────────────────────
+        # â”€â”€ Normal graph flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if text:
             state["messages"].append({"role": "user", "text": text})
 
         new_state = await invoke_onboarding_graph(state)
 
-        # ── Reconcile AML background results ─────────────────────
+        # â”€â”€ Reconcile AML background results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # The graph ran with a snapshot of the session. While it was
         # executing, the AML background task may have completed and
         # written fresh results directly to sessions[sid].  If the
@@ -1386,7 +1425,7 @@ async def chat_endpoint(
                 k: live_meta[k] for k in ("aml_run_started", "aml_started_at")
                 if k in live_meta
             }}
-        # ──────────────────────────────────────────────────────────
+        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         print(
             f"[DEBUG][chat] graph_done sid={sid} stage_before={state.get('stage')} "
@@ -1450,7 +1489,11 @@ async def chat_endpoint(
 
 
 @app.get("/hitl/cases")
-async def get_hitl_cases(include_in_progress: bool = True, flagged_only: bool = False):
+async def get_hitl_cases(
+    include_in_progress: bool = True,
+    flagged_only: bool = False,
+    _: None = Depends(verify_hitl_api_key),
+):
     all_states = await _collect_all_session_states()
     cases: list[dict] = []
     for sid, state in all_states.items():
@@ -1470,7 +1513,10 @@ async def get_hitl_cases(include_in_progress: bool = True, flagged_only: bool = 
 
 
 @app.get("/hitl/summary")
-async def get_hitl_summary(include_in_progress: bool = True):
+async def get_hitl_summary(
+    include_in_progress: bool = True,
+    _: None = Depends(verify_hitl_api_key),
+):
     all_states = await _collect_all_session_states()
     rows = []
     for sid, state in all_states.items():
@@ -1500,7 +1546,11 @@ async def get_hitl_summary(include_in_progress: bool = True):
 
 
 @app.get("/hitl/cases/{session_id}/details")
-async def get_hitl_case_details(session_id: str, db: Session = Depends(get_db)):
+async def get_hitl_case_details(
+    session_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_hitl_api_key),
+):
     from models.compliance_logs import ComplianceStageAlert, LLMDecisionLog
     from audit_logger import AuditLogger
 
@@ -1632,37 +1682,50 @@ async def get_hitl_case_details(session_id: str, db: Session = Depends(get_db)):
 
     rbi = aml_raw.get("rbi") or {}
     if rbi:
+        rbi_status = "error" if rbi.get("error") else ("hit" if rbi.get("hit") else "clear")
         aml_checks.append(
             {
                 "check": "RBI Caution List",
-                "status": "hit" if rbi.get("hit") else "clear",
-                "detail": rbi.get("reason") or "No caution match",
-                "important": bool(rbi.get("hit")),
+                "status": rbi_status,
+                "detail": rbi.get("reason") or rbi.get("error") or "No caution match",
+                "important": bool(rbi.get("hit") or rbi.get("error")),
             }
         )
 
     ofac = aml_raw.get("ofac") or {}
     if ofac:
+        ofac_status = (
+            "error" if ofac.get("error")
+            else "hit" if ofac.get("hit")
+            else "near_miss" if ofac.get("near_miss")
+            else "clear"
+        )
         aml_checks.append(
             {
                 "check": "OFAC Sanctions",
-                "status": "hit" if ofac.get("hit") else ("near_miss" if ofac.get("near_miss") else "clear"),
+                "status": ofac_status,
                 "detail": (
                     f"{ofac.get('matched_name') or 'No match'}"
                     + (f" (score {ofac.get('match_score')})" if ofac.get("match_score") is not None else "")
                 ),
-                "important": bool(ofac.get("hit") or ofac.get("near_miss")),
+                "important": bool(ofac.get("hit") or ofac.get("near_miss") or ofac.get("error")),
             }
         )
 
     pep = aml_raw.get("pep") or {}
     if pep:
+        pep_status = (
+            "error" if pep.get("error")
+            else "hit" if pep.get("hit")
+            else "near_miss" if pep.get("near_miss")
+            else "clear"
+        )
         aml_checks.append(
             {
                 "check": "PEP Screening",
-                "status": "hit" if pep.get("hit") else ("near_miss" if pep.get("near_miss") else "clear"),
+                "status": pep_status,
                 "detail": pep.get("position") or pep.get("matched_name") or "No PEP match",
-                "important": bool(pep.get("hit") or pep.get("near_miss")),
+                "important": bool(pep.get("hit") or pep.get("near_miss") or pep.get("error")),
             }
         )
 
@@ -1744,54 +1807,123 @@ async def _post_to_accuverify(
         )
 
 
+async def _sync_doc_upload_to_session(
+    session_id: str,
+    doc_type: str,
+    result: dict,
+) -> dict:
+    """Persist PAN/Aadhaar/face verified flags from AccuVerify upload into session state."""
+    if not isinstance(result, dict):
+        return result
+    try:
+        state = await _ensure_session_state(session_id)
+    except HTTPException:
+        return result
+
+    verified = bool(result.get("verified"))
+    updates: dict[str, Any] = {}
+    if doc_type == "pan":
+        updates["pan_verified"] = verified
+        if not verified:
+            updates["doc_failure_type"] = "pan"
+    elif doc_type == "aadhaar":
+        updates["aadhaar_verified"] = verified
+        if not verified:
+            updates["doc_failure_type"] = "aadhaar"
+    elif doc_type == "face":
+        updates["face_verified"] = verified
+        if not verified:
+            updates["doc_failure_type"] = "face"
+    else:
+        return result
+
+    merged: OnboardingState = {**state, **updates}
+    merged["document_verified"] = (
+        bool(merged.get("pan_verified"))
+        and bool(merged.get("aadhaar_verified"))
+        and bool(merged.get("face_verified"))
+    )
+    if verified:
+        merged["doc_failure_type"] = None
+    await _commit_session(session_id, merged)
+    return result
+
+
 @app.post("/kyc/pan")
 async def proxy_pan(session_id: str = Form(...), file: UploadFile = File(...)):
-    state = sessions.get(session_id)
-    expected_name = state.get("full_name") if state else None
+    session_id = sanitize_session_id(session_id)
+    try:
+        state = await _ensure_session_state(session_id)
+    except HTTPException:
+        state = {}
+    content = await file.read()
+    enforce_upload_size(content, field_name="pan")
+    expected_name = state.get("full_name")
     
     params = {"user_id": session_id}
     if expected_name:
         params["expected_name"] = expected_name
+    if state.get("dob"):
+        params["expected_dob"] = str(state.get("dob"))
 
-    return await _post_to_accuverify(
+    result = await _post_to_accuverify(
         "upload-pan",
         params=params,
-        files={"file": (file.filename, await file.read(), file.content_type)},
+        files={"file": (file.filename, content, file.content_type)},
     )
+    return await _sync_doc_upload_to_session(session_id, "pan", result)
 
 
 @app.post("/kyc/aadhaar")
 async def proxy_aadhaar(session_id: str = Form(...), file: UploadFile = File(...)):
-    state = sessions.get(session_id)
-    expected_name = state.get("full_name") if state else None
+    session_id = sanitize_session_id(session_id)
+    try:
+        state = await _ensure_session_state(session_id)
+    except HTTPException:
+        state = {}
+    content = await file.read()
+    enforce_upload_size(content, field_name="aadhaar")
+    expected_name = state.get("full_name")
 
     params = {"user_id": session_id}
     if expected_name:
         params["expected_name"] = expected_name
+    if state.get("dob"):
+        params["expected_dob"] = str(state.get("dob"))
 
-    return await _post_to_accuverify(
+    result = await _post_to_accuverify(
         "upload-aadhaar",
         params=params,
-        files={"file": (file.filename, await file.read(), file.content_type)},
+        files={"file": (file.filename, content, file.content_type)},
     )
+    return await _sync_doc_upload_to_session(session_id, "aadhaar", result)
 
 
 @app.post("/kyc/selfie")
 async def proxy_selfie(session_id: str = Form(...), file: UploadFile = File(...)):
-    return await _post_to_accuverify(
+    session_id = sanitize_session_id(session_id)
+    await _ensure_session_state(session_id)
+    content = await file.read()
+    enforce_upload_size(content, field_name="selfie")
+    result = await _post_to_accuverify(
         "upload-selfie",
         params={"user_id": session_id},
-        files={"file": (file.filename, await file.read(), file.content_type)},
+        files={"file": (file.filename, content, file.content_type)},
         timeout=httpx.Timeout(60.0),
     )
+    return await _sync_doc_upload_to_session(session_id, "face", result)
 
 
 @app.post("/kyc/video-kyc")
 async def proxy_video_kyc(session_id: str = Form(...), file: UploadFile = File(...)):
+    session_id = sanitize_session_id(session_id)
+    await _ensure_session_state(session_id)
+    content = await file.read()
+    enforce_upload_size(content, field_name="video_kyc")
     return await _post_to_accuverify(
         "upload-video-kyc",
         params={"user_id": session_id},
-        files={"file": (file.filename, await file.read(), file.content_type)},
+        files={"file": (file.filename, content, file.content_type)},
         timeout=httpx.Timeout(120.0),
     )
 
@@ -1807,3 +1939,4 @@ async def proxy_approve(session_id: str = Form(...)):
 @app.on_event("shutdown")
 async def _shutdown_http_pool() -> None:
     await close_http_client()
+

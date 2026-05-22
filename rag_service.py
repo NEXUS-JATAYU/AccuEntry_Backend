@@ -1,9 +1,10 @@
 from __future__ import annotations
+
 import hashlib
-from logging import exception
-import os, re
-from typing import Optional
+import os
+import re
 from functools import lru_cache
+from typing import Optional
 
 KNOWLEDGE_BASE_DIR = os.path.join(os.path.dirname(__file__), 'knowledge_base.txt')
 #KNOWLEDGE_BASE_DIR = os.getenv('KNOWLEDGE_BASE_DIR', os.path.join(os.getcwd(), 'knowledge_base.txt'))
@@ -12,6 +13,7 @@ COLLECTION_PREFIX = os.getenv("CHROMA_COLLECTION_PREFIX", "accuentry")
 COLLECTION_NAME = f"{COLLECTION_PREFIX}_rag_collection"
 EMBED_MODEL_NAME    = os.getenv("CHROMA_EMBED_MODEL", "all-MiniLM-L6-v2")
 TOP_K = 5
+RAG_USE_CHROMA = os.getenv("RAG_USE_CHROMA", "false").lower() in {"1", "true", "yes"}
 
 
 TOP_K = 5 #you can define it in env variable as well
@@ -72,6 +74,8 @@ def _get_collection():
 
 #api
 def retrieve(query: str, top_k: int = TOP_K) -> list[str]:
+    if not RAG_USE_CHROMA:
+        return _lexical_retrieve(query, top_k)
     try:
         collection = _get_collection()
         if collection is not None:
@@ -95,6 +99,43 @@ def retrieve_as_context(query: str, top_k: int = TOP_K) -> str:
     if not chunks:
         return ""
     return "\n\n---\n\n".join(chunks)
+
+
+def build_faq_retrieval_query(
+    user_text: str,
+    *,
+    stage: str | None = None,
+    decision_action: str | None = None,
+    aml_status: str | None = None,
+) -> str:
+    """
+    Enrich the user question with stage/outcome hints so lexical (or vector)
+    retrieval pulls onboarding-process chunks from knowledge_base.txt.
+    """
+    text = (user_text or "").strip()
+    hints: list[str] = ["AccuEntry bank account onboarding"]
+    aml_lower = (aml_status or "").lower()
+    if aml_lower == "flagged":
+        hints.append("AML flagged compliance rejection branch visit appeal")
+
+    stage_lower = (stage or "").lower()
+    if stage_lower == "complete":
+        hints.append("post activation account next steps timeline")
+    elif stage_lower == "manual_review":
+        hints.append("manual review compliance wait time application status")
+    elif stage_lower == "rejected":
+        hints.append("application rejected KYC AML fraud support")
+    elif stage_lower == "escalated":
+        hints.append("AML compliance escalation officer review")
+    elif stage_lower == "pending_docs":
+        hints.append("additional documents resubmission verification")
+    elif stage_lower == "otp_verification":
+        hints.append("OTP activation email verification")
+    action_lower = (decision_action or "").lower()
+    if action_lower:
+        hints.append(f"decision outcome {action_lower}")
+    hints.append(text)
+    return " ".join(part for part in hints if part)
 
 
 def reindex(path: str = KNOWLEDGE_BASE_DIR) -> int:

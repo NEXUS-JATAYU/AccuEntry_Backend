@@ -3,6 +3,7 @@ from datetime import date
 from typing import Optional
 from rapidfuzz import fuzz
 from core.mongodbase import aml_db
+from agents.aml.aml_scoring import OFAC_FUZZY_HIT_THRESHOLD, PEP_FUZZY_HIT_THRESHOLD
 import time
 from pymongo.errors import ExecutionTimeout, OperationFailure
 import re
@@ -27,25 +28,42 @@ def _get_cached_risk_rules():
     return _risk_rules_cache["data"]
 
 
-def _fallback_search(collection, full_name: str, limit: int = 5):
+def _fallback_search(collection, full_name: str, limit: int = 5, *, include_aliases: bool = False):
     """
     Fallback search when text index is missing.
-    Returns all active documents (index required setup).
+    Filters active records by tokenized name prefix (no unfiltered scans).
     """
+    query_norm = _normalize_name(full_name)
+    if not query_norm:
+        return []
+
+    tokens = [re.escape(t) for t in query_norm.split() if len(t) >= 2]
+    if not tokens:
+        return []
+
+    pattern = ".*".join(tokens)
+    or_clauses: list[dict] = [{"name": {"$regex": pattern, "$options": "i"}}]
+    if include_aliases:
+        or_clauses.append({"aliases": {"$elemMatch": {"$regex": pattern, "$options": "i"}}})
+
     try:
-        cursor = collection.find(
-            {"active": True},
-            {
-                "name": 1,
-                "aliases": 1,
-                "program": 1,
-                "uid": 1,
-                "dob": 1,
-                "position": 1,
-                "pep_tier": 1,
-                "jurisdiction": 1,
-            },
-        ).max_time_ms(QUERY_MAX_MS).limit(limit)
+        cursor = (
+            collection.find(
+                {"active": True, "$or": or_clauses},
+                {
+                    "name": 1,
+                    "aliases": 1,
+                    "program": 1,
+                    "uid": 1,
+                    "dob": 1,
+                    "position": 1,
+                    "pep_tier": 1,
+                    "jurisdiction": 1,
+                },
+            )
+            .max_time_ms(QUERY_MAX_MS)
+            .limit(limit)
+        )
         return list(cursor)
     except Exception:
         return []
@@ -146,7 +164,12 @@ def check_ofac_sanctions(full_name: str) -> dict:
     except OperationFailure as e:
         if "text index required" in str(e):
             # Fallback: no text index yet, search all active records
-            candidates = _fallback_search(aml_db.ofac_sdn_list, normalized_name, limit=TEXT_CANDIDATE_LIMIT)
+            candidates = _fallback_search(
+                aml_db.ofac_sdn_list,
+                normalized_name,
+                limit=TEXT_CANDIDATE_LIMIT,
+                include_aliases=True,
+            )
         else:
             raise
     except ExecutionTimeout:
@@ -168,13 +191,14 @@ def check_ofac_sanctions(full_name: str) -> dict:
             best_score = score
             best_match = candidate
             # Early exit if we hit a hard match
-            if best_score >= 85:
+            if best_score >= OFAC_FUZZY_HIT_THRESHOLD:
                 break
 
+    fuzzy_hit = best_score >= OFAC_FUZZY_HIT_THRESHOLD
     return {
         "source": "ofac_sdn",
-        "hit": False,
-        "near_miss": 70 <= best_score < 85,
+        "hit": fuzzy_hit,
+        "near_miss": (not fuzzy_hit) and 70 <= best_score < OFAC_FUZZY_HIT_THRESHOLD,
         "match_score": best_score,
         "matched_name": best_match["name"] if best_match else None,
         "program": best_match.get("program") if best_match else None,
@@ -268,18 +292,19 @@ def check_pep_list(full_name: str) -> dict:
             best_score = score
             best_match = candidate
             # Early exit if we hit a PEP match
-            if best_score >= 80:
+            if best_score >= PEP_FUZZY_HIT_THRESHOLD:
                 break
 
+    fuzzy_hit = best_score >= PEP_FUZZY_HIT_THRESHOLD
     return {
         "source": "pep_list",
-        "hit": False,
-        "near_miss": 70 <= best_score < 80,
+        "hit": fuzzy_hit,
+        "near_miss": (not fuzzy_hit) and 70 <= best_score < PEP_FUZZY_HIT_THRESHOLD,
         "match_score": best_score,
-        "pep_tier": None,
-        "position": None,
+        "pep_tier": best_match.get("pep_tier") if fuzzy_hit and best_match else None,
+        "position": best_match.get("position") if fuzzy_hit and best_match else None,
         "matched_name": best_match["name"] if best_match else None,
-        "jurisdiction": None,
+        "jurisdiction": best_match.get("jurisdiction") if fuzzy_hit and best_match else None,
     }
 
 
@@ -289,6 +314,7 @@ def evaluate_risk_rules(
     account_type: str,
     ofac_match_score: int,
     pep_match_score: int,
+    politically_exposed: Optional[str] = None,
 ) -> dict:
     """
     Evaluates configurable risk rules (cached, reloaded every hour).
@@ -330,6 +356,10 @@ def evaluate_risk_rules(
             score = (ofac_match_score if p.get("source") == "ofac_sdn"
                      else pep_match_score)
             matched = p["min_score"] <= score <= p["max_score"]
+
+        elif check == "self_declared_pep":
+            declared = (politically_exposed or "").strip().lower()
+            matched = declared in {"yes", "related to one"}
 
         if matched:
             triggered.append({

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Input sanitization, session validation, and optional API-key auth for AccuEntry APIs.
 """
 
@@ -11,7 +11,7 @@ from typing import Annotated
 
 from fastapi import Header, HTTPException, status
 
-# ── Limits ────────────────────────────────────────────────────────────────────
+# â”€â”€ Limits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 MAX_USER_INPUT_LENGTH = int(os.getenv("MAX_USER_INPUT_LENGTH", "4000"))
 MAX_SESSION_ID_LENGTH = 64
 MIN_SESSION_ID_LENGTH = 8
@@ -21,7 +21,7 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BIDI_OVERRIDE_RE = re.compile(r"[\u202a-\u202e\u2066-\u2069]")
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-# High-risk instruction patterns (defense in depth — not a full jailbreak filter)
+# High-risk instruction patterns (defense in depth â€” not a full jailbreak filter)
 _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
@@ -40,6 +40,11 @@ _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 API_KEY = os.getenv("API_KEY", "").strip()
 REQUIRE_API_KEY = os.getenv("REQUIRE_API_KEY", "false").lower() in {"1", "true", "yes"}
 AGENT_SERVICE_API_KEY = os.getenv("AGENT_SERVICE_API_KEY", os.getenv("API_KEY", "")).strip()
+
+HITL_API_KEY = os.getenv("HITL_API_KEY", "").strip()
+REQUIRE_HITL_API_KEY = os.getenv("REQUIRE_HITL_API_KEY", "true").lower() in {"1", "true", "yes"}
+
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
 
 def _normalize_unicode(text: str) -> str:
@@ -126,7 +131,7 @@ _DEFAULT_CORS_ORIGIN_REGEX = (
 def get_cors_middleware_kwargs() -> dict:
     """
     CORS settings for FastAPI. Uses explicit origins plus a dev regex so HITL
-    (e.g. http://localhost:5174 → http://127.0.0.1:8000) preflight succeeds.
+    (e.g. http://localhost:5174 â†’ http://127.0.0.1:8000) preflight succeeds.
 
     Set CORS_ORIGIN_REGEX=false in production to allow only CORS_ORIGINS.
     """
@@ -145,7 +150,7 @@ def get_cors_middleware_kwargs() -> dict:
 async def verify_api_key(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> None:
-    """Optional gateway auth — enable with REQUIRE_API_KEY=true and API_KEY set."""
+    """Optional gateway auth â€” enable with REQUIRE_API_KEY=true and API_KEY set."""
     if not REQUIRE_API_KEY:
         return
     if not API_KEY:
@@ -169,4 +174,30 @@ def verify_agent_service_key(provided: str | None) -> None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized agent service request.",
+        )
+
+
+async def verify_hitl_api_key(
+    x_hitl_api_key: Annotated[str | None, Header(alias="X-HITL-API-Key")] = None,
+) -> None:
+    """Protect /hitl/* dashboards. Set HITL_API_KEY and REQUIRE_HITL_API_KEY=true."""
+    if not REQUIRE_HITL_API_KEY:
+        return
+    if not HITL_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="HITL API key auth is enabled but HITL_API_KEY is not configured.",
+        )
+    if not x_hitl_api_key or x_hitl_api_key != HITL_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing HITL API key.",
+        )
+
+
+def enforce_upload_size(content: bytes, *, field_name: str = "file") -> None:
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"{field_name} exceeds maximum size of {MAX_UPLOAD_BYTES} bytes.",
         )

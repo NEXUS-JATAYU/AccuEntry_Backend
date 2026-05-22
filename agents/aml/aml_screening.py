@@ -9,10 +9,59 @@ from agents.aml.tools import (
     check_pep_list,
     evaluate_risk_rules,
 )
-from agents.aml.aml_scoring import compute_risk_score, route_by_score
+from agents.aml.aml_scoring import compute_risk_score, route_after_aggregate, has_screening_failure
 from rag_service import retrieve_as_context
 
 _memory = AgentMemoryManager()
+
+_RBI_TIMEOUT_S = 2.0
+_OFAC_PEP_TIMEOUT_S = 3.5
+
+
+def _empty_ofac() -> dict:
+    return {
+        "source": "ofac_sdn",
+        "hit": False,
+        "near_miss": False,
+        "match_score": 0,
+        "matched_name": None,
+        "program": None,
+        "uid": None,
+    }
+
+
+def _empty_pep() -> dict:
+    return {
+        "source": "pep_list",
+        "hit": False,
+        "near_miss": False,
+        "match_score": 0,
+        "pep_tier": None,
+        "position": None,
+        "matched_name": None,
+        "jurisdiction": None,
+    }
+
+
+def _empty_rbi() -> dict:
+    return {
+        "source": "rbi_caution_list",
+        "hit": False,
+        "reason": None,
+        "matched_name": None,
+        "bank": None,
+    }
+
+
+def _evaluate_rules(state: OnboardingState, ofac: dict, pep: dict) -> dict:
+    return evaluate_risk_rules(
+        state.get("full_name") or "",
+        state.get("dob"),
+        state.get("account_type", ""),
+        ofac_match_score=ofac.get("match_score", 0),
+        pep_match_score=pep.get("match_score", 0),
+        politically_exposed=state.get("politically_exposed"),
+    )
 
 
 def _store_aml_memory(state: OnboardingState, final_status: str, outcome_stage: str) -> None:
@@ -28,6 +77,7 @@ def _store_aml_memory(state: OnboardingState, final_status: str, outcome_stage: 
             "aml_in_background": bool(state.get("aml_in_background")),
             "full_name": state.get("full_name"),
             "pan_number": state.get("pan_number"),
+            "politically_exposed": state.get("politically_exposed"),
         },
         output_data={
             "aml_status": final_status,
@@ -50,99 +100,49 @@ def _store_aml_memory(state: OnboardingState, final_status: str, outcome_stage: 
 
 async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
     """
-    Fires checks more efficiently:
-    1. Run RBI, OFAC, PEP checks in parallel
-    2. Evaluate risk rules once with real scores (no placeholder/re-run)
+    Runs RBI, OFAC, PEP checks and configurable risk rules.
+    Timeouts are fail-closed (marked error → manual review in routing).
     """
     loop = asyncio.get_running_loop()
 
     pan_number = state.get("pan_number") or ""
     full_name = state.get("full_name") or ""
 
-    # Fast-path: RBI PAN hit is sufficient for hard AML flag.
-    # Timeout-guard the executor call so AML can never stay in checking forever.
     try:
         rbi = await asyncio.wait_for(
             loop.run_in_executor(None, check_rbi_caution_list, pan_number),
-            timeout=2.0,
+            timeout=_RBI_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        rbi = {
-            "source": "rbi_caution_list",
-            "hit": False,
-            "reason": None,
-            "matched_name": None,
-            "bank": None,
-        }
+        rbi = {**_empty_rbi(), "error": "timeout"}
+
     if rbi.get("hit"):
+        rules = _evaluate_rules(state, _empty_ofac(), _empty_pep())
         return {
             "aml_status": "checking",
             "aml_completed": False,
             "aml_risk_score": state.get("aml_risk_score") or 0,
             "aml_raw_results": {
                 "rbi": rbi,
-                "ofac": {
-                    "source": "ofac_sdn",
-                    "hit": False,
-                    "near_miss": False,
-                    "match_score": 0,
-                    "matched_name": None,
-                    "program": None,
-                    "uid": None,
-                },
-                "pep": {
-                    "source": "pep_list",
-                    "hit": False,
-                    "near_miss": False,
-                    "match_score": 0,
-                    "pep_tier": None,
-                    "position": None,
-                    "matched_name": None,
-                    "jurisdiction": None,
-                },
-                "rules": {
-                    "source": "risk_rules",
-                    "triggered_rules": [],
-                    "total_delta": 0,
-                },
+                "ofac": _empty_ofac(),
+                "pep": _empty_pep(),
+                "rules": rules,
             },
         }
 
     ofac_task = loop.run_in_executor(None, check_ofac_sanctions, full_name)
     pep_task = loop.run_in_executor(None, check_pep_list, full_name)
 
-    # Bound non-RBI checks to avoid occasional long hangs.
     try:
-        ofac, pep = await asyncio.wait_for(asyncio.gather(ofac_task, pep_task), timeout=3.5)
+        ofac, pep = await asyncio.wait_for(
+            asyncio.gather(ofac_task, pep_task),
+            timeout=_OFAC_PEP_TIMEOUT_S,
+        )
     except asyncio.TimeoutError:
-        ofac = {
-            "source": "ofac_sdn",
-            "hit": False,
-            "near_miss": False,
-            "match_score": 0,
-            "matched_name": None,
-            "program": None,
-            "uid": None,
-        }
-        pep = {
-            "source": "pep_list",
-            "hit": False,
-            "near_miss": False,
-            "match_score": 0,
-            "pep_tier": None,
-            "position": None,
-            "matched_name": None,
-            "jurisdiction": None,
-        }
+        ofac = {**_empty_ofac(), "error": "timeout"}
+        pep = {**_empty_pep(), "error": "timeout"}
 
-    # Now run rules once with real scores from OFAC/PEP
-    rules = evaluate_risk_rules(
-        state.get("full_name") or "",
-        state.get("dob"),
-        state.get("account_type", ""),
-        ofac_match_score=ofac.get("match_score", 0),
-        pep_match_score=pep.get("match_score", 0),
-    )
+    rules = _evaluate_rules(state, ofac, pep)
 
     return {
         "aml_status": "checking",
@@ -153,7 +153,7 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
             "ofac": ofac,
             "pep": pep,
             "rules": rules,
-        }
+        },
     }
 
 
@@ -161,25 +161,14 @@ async def run_checks_node(state: OnboardingState) -> dict[str, Any]:
 
 def aggregate_node(state: OnboardingState) -> dict[str, Any]:
     raw = state.get("aml_raw_results") or {}
-    # Requirement: if PAN or name is found in AML datasets => flagged, else clear.
-    # Use deterministic terminal scoring to avoid ambiguity and prevent re-looping.
-    has_identity_hit = bool(
-        (raw.get("rbi") or {}).get("hit")
-        or (raw.get("ofac") or {}).get("hit")
-        or (raw.get("pep") or {}).get("hit")
-    )
-    score = 100 if has_identity_hit else 0
-    # Keep computed score for observability, but decision routing uses deterministic score above.
-    _ = compute_risk_score(raw)
-    return {
-        "aml_risk_score": score,
-    }
+    score = compute_risk_score(raw)
+    return {"aml_risk_score": score}
 
 
 # ── Routing function ─────────────────────────────────────────────
 
 def route_node(state: OnboardingState) -> str:
-    return route_by_score(state["aml_risk_score"])
+    return route_after_aggregate(state)
 
 
 # ── Node 3a: auto clear ───────────────────────────────────────────
@@ -196,25 +185,34 @@ def auto_clear_node(state: OnboardingState) -> dict[str, Any]:
             "role": "assistant",
             "text": "AML screening complete — all checks passed. "
                     "Proceeding to the final fraud check."
-        }]
+        }],
     }
 
 
 # ── Node 3b: auto flag ────────────────────────────────────────────
 
-def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
-    _store_aml_memory(state, final_status="flagged", outcome_stage="rejected")
+async def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
+    from agents.aml.aml_user_report import build_aml_flag_user_message
+
     raw_aml = state.get("aml_raw_results") or {}
     pep_hit = (raw_aml.get("pep") or {}).get("hit")
     ofac_hit = (raw_aml.get("ofac") or {}).get("hit")
-    flag_type = "PEP" if pep_hit else ("OFAC sanctions" if ofac_hit else "AML")
-    
+    rbi_hit = (raw_aml.get("rbi") or {}).get("hit")
+    flag_type = (
+        "PEP" if pep_hit
+        else "OFAC sanctions" if ofac_hit
+        else "RBI caution list" if rbi_hit
+        else "AML"
+    )
+
     try:
         policy_excerpt = retrieve_as_context(f"AML rules for {flag_type}", top_k=3)
     except Exception as e:
         policy_excerpt = "Standard AML non-compliance policy applied."
         print(f"Failed to retrieve policy: {e}")
-    
+
+    report_text = await build_aml_flag_user_message(state)
+
     _store_aml_memory(state, final_status="flagged", outcome_stage="rejected")
     return {
         "aml_status": "flagged",
@@ -223,21 +221,34 @@ def auto_flag_node(state: OnboardingState) -> dict[str, Any]:
         "aml_policy_excerpt": policy_excerpt,
         "stage": "rejected",
         "progress": 100,
-        "messages": [{
-            "role": "assistant",
-            "text": "Your account is flagged for non compliance. A ticket has been raised. Bank staff will contact you in 1-2 days."
-        }]
+        "decision_action": "reject",
+        "decision_reason": f"AML flagged — primary source: {flag_type}",
+        "messages": [{"role": "assistant", "text": report_text}],
     }
 
 
-# ── Node 3c: LLM review for ambiguous cases (score 30–69) ────────
+# ── Node 3c: manual review for ambiguous cases (score 30–69) ────
 
-def llm_review_node(state: OnboardingState) -> dict[str, Any]:
-    score = state["aml_risk_score"]
-    # Deterministic fallback for review band to avoid any LLM-induced stalls.
-    if score < 50:
-        return auto_clear_node(state)
-    return auto_flag_node(state)
+def manual_review_node(state: OnboardingState) -> dict[str, Any]:
+    raw = state.get("aml_raw_results") or {}
+
+    if has_screening_failure(raw):
+        reason = "One or more AML list checks could not be completed in time."
+    else:
+        reason = "Elevated AML risk score requires compliance review."
+
+    _store_aml_memory(state, final_status="review", outcome_stage="manual_review")
+    return {
+        "aml_status": "review",
+        "aml_completed": True,
+        "aml_risk_score": int(state.get("aml_risk_score") or 0),
+        "stage": "manual_review",
+        "progress": 85,
+        "messages": [{
+            "role": "assistant",
+            "text": f"{reason} Your application has been routed for manual compliance review.",
+        }],
+    }
 
 
 # ── Build the subgraph ────────────────────────────────────────────
@@ -245,23 +256,23 @@ def llm_review_node(state: OnboardingState) -> dict[str, Any]:
 def build_aml_graph():
     g = StateGraph(OnboardingState)
 
-    g.add_node("run_checks",  run_checks_node)
-    g.add_node("aggregate",   aggregate_node)
-    g.add_node("auto_clear",  auto_clear_node)
-    g.add_node("auto_flag",   auto_flag_node)
-    g.add_node("llm_review",  llm_review_node)
+    g.add_node("run_checks", run_checks_node)
+    g.add_node("aggregate", aggregate_node)
+    g.add_node("auto_clear", auto_clear_node)
+    g.add_node("auto_flag", auto_flag_node)
+    g.add_node("manual_review", manual_review_node)
 
     g.set_entry_point("run_checks")
     g.add_edge("run_checks", "aggregate")
 
     g.add_conditional_edges("aggregate", route_node, {
         "auto_clear": "auto_clear",
-        "auto_flag":  "auto_flag",
-        "llm_review": "llm_review",
+        "auto_flag": "auto_flag",
+        "manual_review": "manual_review",
     })
 
-    g.add_edge("auto_clear",  END)
-    g.add_edge("auto_flag",   END)
-    g.add_edge("llm_review",  END)
+    g.add_edge("auto_clear", END)
+    g.add_edge("auto_flag", END)
+    g.add_edge("manual_review", END)
 
     return g.compile()
