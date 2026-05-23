@@ -271,7 +271,7 @@ def _session_closed_response(state: OnboardingState, *, reason: str) -> ChatResp
     reply = SESSION_IDLE_TIMEOUT_MESSAGE if reason == "idle_timeout" else _last_assistant_text(state.get("messages", [])) or SESSION_IDLE_TIMEOUT_MESSAGE
     return ChatResponse(
         message=reply,
-        progress=state.get("progress", 0),
+        progress=_effective_progress(state),
         requires_upload=state.get("requires_upload", False),
         stage=stage,
         completed=stage == "complete",
@@ -309,7 +309,9 @@ async def _load_session_cache(session_id: str) -> OnboardingState | None:
         if not isinstance(cached, dict):
             return None
         # Rehydrate with defaults so missing keys from older sessions do not break flow.
-        return {**_initial_onboarding_state(session_id), **cached}
+        merged = {**_initial_onboarding_state(session_id), **cached}
+        merged["progress"] = _effective_progress(merged)
+        return merged
     except Exception as exc:
         print(f"[DEBUG][redis] load_failed sid={session_id} err={exc}")
         return None
@@ -698,6 +700,32 @@ def _ui_step_and_label(stage: str) -> tuple[int, str]:
     }
     return mapping.get(stage, (1, "Detail Capture"))
 
+
+_STAGE_PROGRESS_FLOOR: dict[str, int] = {
+    "data_capture": 0,
+    "doc_verification": 40,
+    "kyc_approval": 65,
+    "aml_screening": 70,
+    "fraud_check": 80,
+    "decision_agent": 85,
+    "manual_review": 85,
+    "pending_docs": 85,
+    "escalated": 85,
+    "otp_verification": 95,
+    "complete": 100,
+    "rejected": 100,
+}
+
+
+def _effective_progress(state: OnboardingState) -> int:
+    """Ensure UI progress never lags behind the current pipeline stage."""
+    stage = state.get("stage") or "data_capture"
+    if stage in {"complete", "rejected"}:
+        return 100
+    raw = int(state.get("progress") or 0)
+    floor = _STAGE_PROGRESS_FLOOR.get(stage, 0)
+    return min(100, max(raw, floor))
+
 def _save_state_to_db(state: OnboardingState, db: Session) -> None:
     from models.customer_info import CustomerDetails
     from datetime import datetime
@@ -825,6 +853,13 @@ def _persist_session_tracking(state: OnboardingState, db: Session) -> None:
 
 
 def _generate_llm_decision_summary(state: OnboardingState) -> tuple[str, bool]:
+    from audit_logger import (
+        _LLM_SYSTEM_PROMPT,
+        audit_fallback_line,
+        normalize_audit_display_text,
+        undecided_progress_line,
+    )
+
     stage = state.get("stage") or "data_capture"
     decision_action = state.get("decision_action") or "undecided"
     decision_reason = state.get("decision_reason") or "No reason was provided"
@@ -832,12 +867,22 @@ def _generate_llm_decision_summary(state: OnboardingState) -> tuple[str, bool]:
     aml_status = state.get("aml_status") or "pending"
     fraud_signals = state.get("fraud_signals") or []
 
-    fallback = (
-        f"- Stage: {stage}\n"
-        f"- Decision: {decision_action}\n"
-        f"- Reason: {decision_reason}\n"
-        f"- Risk snapshot: fraud_score={fraud_score}, aml_status={aml_status}, signals={', '.join(fraud_signals[:4]) or 'none'}"
-    )
+    if str(decision_action).strip().lower() == "undecided":
+        return undecided_progress_line(stage), False
+
+    if str(decision_action).strip().lower() == "approve":
+        fallback = (
+            decision_reason
+            if decision_reason and decision_reason != "No reason was provided"
+            else "Approved; low risk and AML clear."
+        )
+    else:
+        fallback = audit_fallback_line(
+            stage=stage,
+            event_type="decision_summary",
+            decision=decision_action,
+            output_payload={"action": decision_action, "reason": decision_reason, "stage": stage},
+        )
 
     try:
         from llm_config import AgentLLM
@@ -853,16 +898,11 @@ def _generate_llm_decision_summary(state: OnboardingState) -> tuple[str, bool]:
         llm = AgentLLM().get_llm("decision_agent")
         response = llm.invoke(
             [
-                SystemMessage(
-                    content=(
-                        "You are writing customer-friendly compliance audit notes. "
-                        "Return exactly 3-5 concise bullet points, each prefixed with '-'. "
-                        "Do not invent details. Keep it factual and readable for operations teams."
-                    )
-                ),
+                SystemMessage(content=_LLM_SYSTEM_PROMPT),
                 HumanMessage(
                     content=(
-                        "Convert this decision event into human-readable bullet points:\n"
+                        "Summarize this decision event in one sentence for a compliance reviewer. "
+                        "Do not invent facts.\n"
                         f"{json.dumps(payload, default=str)}"
                     )
                 ),
@@ -870,11 +910,12 @@ def _generate_llm_decision_summary(state: OnboardingState) -> tuple[str, bool]:
         )
         text = str(getattr(response, "content", "") or "").strip()
         if not text:
-            return fallback, False
-        return text, True
+            return normalize_audit_display_text(fallback) or fallback, False
+        normalized = normalize_audit_display_text(text)
+        return normalized or fallback, True
     except Exception as exc:
         print(f"[DEBUG][decision_log] llm_generation_failed err={exc}")
-        return fallback, False
+        return normalize_audit_display_text(fallback) or fallback, False
 
 
 def _upsert_llm_decision_summary_log(state: OnboardingState, db: Session) -> None:
@@ -1092,7 +1133,6 @@ async def chat_endpoint(
         }:
             stage = state["stage"]
             step, main_step = _ui_step_and_label(stage)
-            effective_progress = 100 if stage in {"complete", "rejected"} else state.get("progress", 0)
             reply = _last_assistant_text(state.get("messages", [])) or _fallback_assistant_message(
                 stage,
                 state.get("requires_upload", False),
@@ -1100,7 +1140,7 @@ async def chat_endpoint(
             print(f"[DEBUG][chat] empty_poll_short_circuit sid={sid} stage={stage}")
             return ChatResponse(
                 message=reply,
-                progress=effective_progress,
+                progress=_effective_progress(state),
                 requires_upload=state.get("requires_upload", False),
                 stage=stage,
                 completed=stage == "complete",
@@ -1152,14 +1192,9 @@ async def chat_endpoint(
 
             faq_stage = sessions[sid].get("stage") or "complete"
             step, main_step = _ui_step_and_label(faq_stage)
-            faq_progress = (
-                100
-                if faq_stage in {"complete", "rejected"}
-                else int(sessions[sid].get("progress") or 85)
-            )
             return ChatResponse(
                 message=assistant_text,
-                progress=faq_progress,
+                progress=_effective_progress(sessions[sid]),
                 requires_upload=False,
                 stage=faq_stage,
                 completed=faq_stage == "complete",
@@ -1211,8 +1246,11 @@ async def chat_endpoint(
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
-                    message=reply, progress=state["progress"],
-                    stage=stage, step=step, current_main_step=main_step,
+                    message=reply,
+                    progress=_effective_progress(state),
+                    stage=stage,
+                    step=step,
+                    current_main_step=main_step,
                     aml_status=state.get("aml_status", "pending"),
                     aml_in_background=state.get("aml_in_background", False),
                     fraud_status=state.get("fraud_status"),
@@ -1280,8 +1318,11 @@ async def chat_endpoint(
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
-                    message=reply, progress=state["progress"],
-                    stage=stage, step=step, current_main_step=main_step,
+                    message=reply,
+                    progress=_effective_progress(state),
+                    stage=stage,
+                    step=step,
+                    current_main_step=main_step,
                     aml_status=state.get("aml_status", "pending"),
                     aml_in_background=state.get("aml_in_background", False),
                     fraud_status=state.get("fraud_status"),
@@ -1300,8 +1341,11 @@ async def chat_endpoint(
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
-                    message=reply, progress=state["progress"],
-                    stage=stage, step=step, current_main_step=main_step,
+                    message=reply,
+                    progress=_effective_progress(state),
+                    stage=stage,
+                    step=step,
+                    current_main_step=main_step,
                     aml_status=state.get("aml_status", "pending"),
                     aml_in_background=state.get("aml_in_background", False),
                     fraud_status=state.get("fraud_status"),
@@ -1321,8 +1365,11 @@ async def chat_endpoint(
                 stage = state["stage"]
                 step, main_step = _ui_step_and_label(stage)
                 return ChatResponse(
-                    message=msg, progress=state["progress"],
-                    stage=stage, step=step, current_main_step=main_step,
+                    message=msg,
+                    progress=_effective_progress(state),
+                    stage=stage,
+                    step=step,
+                    current_main_step=main_step,
                     aml_status=state.get("aml_status", "pending"),
                     aml_in_background=state.get("aml_in_background", False),
                     fraud_status=state.get("fraud_status"),
@@ -1433,8 +1480,7 @@ async def chat_endpoint(
             f"fraud_score={new_state.get('fraud_risk_score')} aml_status={new_state.get('aml_status')}"
         )
         sessions[sid] = _trim_messages(new_state)
-        if sessions[sid].get("stage") in {"complete", "rejected"}:
-            sessions[sid]["progress"] = 100
+        sessions[sid]["progress"] = _effective_progress(sessions[sid])
         sessions[sid]["metadata"] = {
             **(sessions[sid].get("metadata") or {}),
             "last_activity_at": (state.get("metadata") or {}).get("last_activity_at", _iso_now()),
@@ -1459,7 +1505,6 @@ async def chat_endpoint(
 
         stage = latest_state["stage"]
         step, main_step = _ui_step_and_label(stage)
-        effective_progress = 100 if stage in {"complete", "rejected"} else latest_state["progress"]
         raw_reply = _last_assistant_text(latest_state["messages"])
         reply = raw_reply or _fallback_assistant_message(
             stage,
@@ -1467,7 +1512,7 @@ async def chat_endpoint(
         )
         return ChatResponse(
             message=reply,
-            progress=effective_progress,
+            progress=_effective_progress(latest_state),
             requires_upload=latest_state["requires_upload"],
             stage=stage,
             completed=stage == "complete",
@@ -1657,7 +1702,9 @@ async def get_hitl_case_details(
                 .all()
             )
 
-    audit_logs = [
+    from audit_logger import dedupe_adjacent_audit_logs, resolve_audit_display_line, resolve_audit_status
+
+    audit_logs_raw = [
         {
             "id": row.id,
             "stage": row.stage,
@@ -1670,9 +1717,22 @@ async def get_hitl_case_details(
             "output_payload": row.output_payload_json,
             "metadata": row.metadata_json,
             "created_at": row.created_at.isoformat() if row.created_at else None,
+            "display_line": resolve_audit_display_line(
+                friendly_text=row.friendly_text,
+                stage=row.stage,
+                event_type=row.event_type,
+                decision=row.decision,
+                output_payload=row.output_payload_json if isinstance(row.output_payload_json, dict) else None,
+            ),
+            "status": resolve_audit_status(
+                decision=row.decision,
+                output_payload=row.output_payload_json if isinstance(row.output_payload_json, dict) else None,
+                decision_source=row.decision_source,
+            ),
         }
         for row in audit_rows
     ]
+    audit_logs = dedupe_adjacent_audit_logs(audit_logs_raw)
 
     overall_alerts = sum(item["alert_count"] for item in alerts)
     total_flagged_stages = len([item for item in alerts if item["overall_flagged"]])
