@@ -12,7 +12,7 @@ import os
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
+from llm_config import AgentLLM
 
 from agents.faq.faq_agent import POST_PROCESS_FAQ_INVITE
 from state import OnboardingState
@@ -222,11 +222,7 @@ async def build_aml_flag_user_message(
         return deterministic
 
     try:
-        llm = ChatOllama(
-            model=os.getenv("OLLAMA_MODEL", os.getenv("AGENT_LLM_MODEL", "llama3.2")),
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            temperature=0.1,
-        )
+        llm = AgentLLM().get_llm("aml")
         response = await llm.ainvoke([
             SystemMessage(content=_AML_REPORT_LLM_PROMPT),
             HumanMessage(content=json.dumps(details, indent=2)),

@@ -33,6 +33,7 @@ from core.security import (
     verify_api_key,
     verify_hitl_api_key,
 )
+from core.verify_client import get_verify_request_headers
 from services.agent_runner import (
     agent_runtime_mode,
     invoke_aml_graph,
@@ -116,6 +117,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:9000").rstrip("/")
 app.add_middleware(CORSMiddleware, **get_cors_middleware_kwargs())
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 sessions: dict[str, OnboardingState] = {}
 aml_tasks: dict[str, asyncio.Task] = {}
@@ -1823,10 +1829,7 @@ async def _post_to_accuverify(
     """Forward to AccuVerify; map connection errors to 503 instead of ASGI 500."""
     client = get_http_client()
     url = f"{ACCUVERIFY_URL}/{path.lstrip('/')}"
-    headers: dict[str, str] = {}
-    verify_key = os.getenv("VERIFY_SERVICE_API_KEY", "").strip()
-    if verify_key and path.lstrip("/").startswith("agent/"):
-        headers["X-Verify-Service-Key"] = verify_key
+    headers = get_verify_request_headers()
     try:
         resp = await client.post(url, params=params, files=files, timeout=timeout, headers=headers or None)
     except httpx.ConnectError as exc:

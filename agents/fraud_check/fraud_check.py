@@ -118,30 +118,11 @@ def _document_verified(state: OnboardingState) -> bool:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _ollama_generate(prompt: str, timeout: int = 30) -> str:
-    """
-    POST to Ollama's /api/generate endpoint (non-streaming).
-    Returns the model's response text, or raises on failure.
-    """
-    payload = json.dumps({
-        "model": FRAUD_LLM_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,   # low temp for consistent JSON output
-            "num_predict": 256,   # enough for our JSON schema, keeps it fast
-        },
-    }).encode()
+def _llm_generate(prompt: str, timeout: int = 30) -> str:
+    """LLM text generation via Gemini (production) or Ollama (local)."""
+    from llm_config import generate_text
 
-    req = urllib.request.Request(
-        f"{OLLAMA_BASE_URL}/api/generate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode())
-    return body["response"]
+    return generate_text(prompt, model=FRAUD_LLM_MODEL, timeout=timeout)
 
 
 def _load_ip_blocklist() -> set[str]:
@@ -494,7 +475,7 @@ async def layer4_llm_reasoning(
 
     try:
         prompt = _PROMPT_TEMPLATE.format(bundle=json.dumps(bundle))
-        raw = await asyncio.to_thread(_ollama_generate, prompt)
+        raw = await asyncio.to_thread(_llm_generate, prompt)
 
         # gemma2:2b sometimes wraps output in ```json ... ``` â€” strip it
         raw = re.sub(r"^```json\s*|\s*```$", "", raw.strip(), flags=re.DOTALL).strip()
@@ -514,15 +495,12 @@ async def layer4_llm_reasoning(
 
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            reason = (
-                f"Ollama model not found (HTTP 404) for '{FRAUD_LLM_MODEL}' at {OLLAMA_BASE_URL}. "
-                f"Run: ollama pull {FRAUD_LLM_MODEL}"
-            )
+            reason = f"LLM model not found (HTTP 404) for '{FRAUD_LLM_MODEL}'"
         else:
-            reason = f"Ollama HTTP error {exc.code}: {exc.reason}"
+            reason = f"LLM HTTP error {exc.code}: {exc.reason}"
         return _fallback(reason)
     except urllib.error.URLError as exc:
-        return _fallback(f"Ollama unreachable: {exc}")
+        return _fallback(f"LLM unreachable: {exc}")
     except json.JSONDecodeError as exc:
         return _fallback(f"JSON parse error: {exc}")
     except Exception as exc:

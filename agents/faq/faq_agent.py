@@ -1,7 +1,7 @@
 # agents/faq/faq_agent.py
 from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
+from llm_config import AgentLLM
 from rag_service import build_faq_retrieval_query, retrieve_as_context
 from state import OnboardingState
 from prompts import SYSTEM_PROMPT
@@ -75,7 +75,7 @@ async def faq_node(state: OnboardingState) -> dict:
     formatted_prompt = SYSTEM_PROMPT.format(context=policy_chunks, question=user_text)
     
     try:
-        llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "gemma2:2b"), temperature=0)
+        llm = AgentLLM().get_llm("faq")
         response = await llm.ainvoke([
             SystemMessage(content=formatted_prompt),
             HumanMessage(content=user_text),

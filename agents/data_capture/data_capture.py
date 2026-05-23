@@ -11,7 +11,7 @@ import os
 from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
+from llm_config import AgentLLM
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from rag_service import retrieve_as_context
@@ -118,18 +118,13 @@ def _last_user_text(state: OnboardingState) -> str:
     return ""
 
 
-def _llm() -> ChatOllama:
-    model = os.getenv("OLLAMA_MODEL", "gemma2:2b")
-    return ChatOllama(model=model, temperature=0)
+_llm_singleton = None
 
 
-_llm_singleton: Optional[ChatOllama] = None
-
-
-def _get_llm() -> ChatOllama:
+def _get_llm():
     global _llm_singleton
     if _llm_singleton is None:
-        _llm_singleton = _llm()
+        _llm_singleton = AgentLLM().get_llm("data_capture")
     return _llm_singleton
 
 
