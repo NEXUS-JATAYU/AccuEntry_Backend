@@ -81,9 +81,6 @@ import models.compliance_logs
 from scripts.init_aml_indices import init_aml_indices
 from core.redis_client import redis_client
 
-# Initialize DB tables
-Base.metadata.create_all(bind=engine)
-
 
 def _sync_customer_details_schema() -> None:
     try:
@@ -106,17 +103,36 @@ def _sync_customer_details_schema() -> None:
     except Exception as exc:
         print(f"[DEBUG][schema] customer_details_sync_failed err={exc}")
 
-
-_sync_customer_details_schema()
-
-# Initialize AML MongoDB indices
-init_aml_indices()
-
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:9000").rstrip("/")
 app.add_middleware(CORSMiddleware, **get_cors_middleware_kwargs())
+
+startup_tasks: list[asyncio.Task] = []
+
+
+async def _initialize_background_resources() -> None:
+    """Run slow or optional startup work without blocking the HTTP server from binding."""
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:
+        logger.warning("DB table init skipped/failed: %s", exc)
+
+    try:
+        _sync_customer_details_schema()
+    except Exception as exc:
+        logger.warning("Customer schema sync skipped/failed: %s", exc)
+
+    try:
+        init_aml_indices()
+    except Exception as exc:
+        logger.warning("AML index init skipped/failed: %s", exc)
+
+
+@app.on_event("startup")
+async def _kickoff_startup_initialization() -> None:
+    startup_tasks.append(asyncio.create_task(_initialize_background_resources()))
 
 
 @app.get("/health")
