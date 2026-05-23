@@ -1,4 +1,4 @@
-﻿"""
+"""
 Fraud check subgraph: layered identity validation + LLM risk reasoning.
 
 Architecture
@@ -628,6 +628,10 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
             "progress": 100,
             "decision_action": "reject",
             "decision_reason": "AML flagged during fraud screening gate",
+            "assigned_employee_name": state.get("assigned_employee_name"),
+            "assigned_bank_branch": state.get("assigned_bank_branch"),
+            "assigned_date": state.get("assigned_date"),
+            "assigned_time": state.get("assigned_time"),
             "messages": [{"role": "assistant", "text": report_text}],
         }
 

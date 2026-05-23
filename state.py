@@ -130,3 +130,9 @@ class OnboardingState(TypedDict):
     keystroke_entropy: Optional[float]
     recaptcha_score: Optional[float]
     typing_velocity: Optional[float]
+
+    # ── Employee Assignment ──────────────────────────────────
+    assigned_employee_name: Optional[str]
+    assigned_bank_branch: Optional[str]
+    assigned_date: Optional[str]
+    assigned_time: Optional[str]

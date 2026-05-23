@@ -27,7 +27,7 @@ Output plain text suitable for a chat message with this structure:
 2) Reference ID and risk score
 3) Section "Where you were flagged" — bullet each failed/important check with check name and reason
 4) Section "Why your application cannot proceed online" — 1-3 sentences from the facts
-5) Section "What to do next" — MUST say to visit the nearest AccuEntry branch in person with original ID documents and the reference ID; mention compliance will review screening results
+5) Section "What to do next" — MUST state exactly: "You have been assigned to {assigned_employee_name} and at {assigned_bank_branch} at {assigned_date} from {assigned_time}." using the exact fields from the JSON. DO NOT say "visit your nearest branch".
 6) End with exactly one line inviting process questions (use the invite text provided in facts if present)
 
 Keep tone professional and clear. No markdown headers with #. Use bullet characters (•) and line breaks. Max 220 words."""
@@ -132,6 +132,42 @@ def extract_aml_flag_details(state: OnboardingState) -> dict[str, Any]:
     if not flagged_checks and rule_lines:
         primary = "Risk policy rules"
 
+    assigned_name = state.get("assigned_employee_name")
+    assigned_branch = state.get("assigned_bank_branch")
+    assigned_date = state.get("assigned_date")
+    assigned_time = state.get("assigned_time")
+    if not assigned_name:
+        try:
+            from core.database import SessionLocal
+            from models.employee import Employee, CaseAssignment
+            from sqlalchemy import func
+            from datetime import datetime
+            with SessionLocal() as db:
+                sid = state.get("session_id")
+                if sid:
+                    emp = db.query(Employee).order_by(func.random()).first()
+                    if not emp:
+                        emp = Employee(email="compliance@accuentry.com", name="System Manager", task="Review", section="Compliance", bank_branch="Main Branch")
+                        db.add(emp)
+                        db.commit()
+                        db.refresh(emp)
+                    existing = db.query(CaseAssignment).filter(CaseAssignment.session_id == sid).first()
+                    if not existing:
+                        assignment = CaseAssignment(session_id=sid, employee_id=emp.id)
+                        db.add(assignment)
+                        db.commit()
+                    assigned_name = emp.name
+                    assigned_branch = emp.bank_branch
+                    assigned_date = datetime.now().strftime("%Y-%m-%d")
+                    assigned_time = datetime.now().strftime("%I:%M %p")
+                    # Update state dict directly so it persists upstream if possible
+                    state["assigned_employee_name"] = assigned_name
+                    state["assigned_bank_branch"] = assigned_branch
+                    state["assigned_date"] = assigned_date
+                    state["assigned_time"] = assigned_time
+        except Exception as e:
+            logger.error(f"Error assigning employee: {e}")
+
     return {
         "reference_id": (state.get("audit_session_id") or state.get("session_id") or "N/A")[:8].upper(),
         "aml_risk_score": int(state.get("aml_risk_score") or 0),
@@ -140,6 +176,10 @@ def extract_aml_flag_details(state: OnboardingState) -> dict[str, Any]:
         "triggered_rules": rule_lines,
         "primary_flag_source": primary,
         "faq_invite": POST_PROCESS_FAQ_INVITE,
+        "assigned_employee_name": assigned_name or "a manager",
+        "assigned_bank_branch": assigned_branch or "our branch",
+        "assigned_date": assigned_date or "today",
+        "assigned_time": assigned_time or "now",
     }
 
 
@@ -190,9 +230,7 @@ def build_aml_flag_report_deterministic(details: dict[str, Any]) -> str:
         "Regulations require in-person verification before an account can be opened.",
         "",
         "WHAT TO DO NEXT:",
-        "  1. Visit your nearest AccuEntry branch in person.",
-        "  2. Bring original PAN, Aadhaar, and this Reference ID.",
-        "  3. A compliance officer will review these screening results with you.",
+        f"  You have been assigned to {details.get('assigned_employee_name')} and at {details.get('assigned_bank_branch')} at {details.get('assigned_date')} from {details.get('assigned_time')}",
         "",
         details.get("faq_invite", POST_PROCESS_FAQ_INVITE),
     ])

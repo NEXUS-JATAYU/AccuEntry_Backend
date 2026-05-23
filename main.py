@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import os
 import asyncio
 import json
@@ -77,6 +77,7 @@ from agents.data_capture.data_capture_validators import (
 from memory_manager import AgentMemoryManager
 import models.customer_info
 import models.compliance_logs
+import models.employee
 from scripts.init_aml_indices import init_aml_indices
 from core.redis_client import redis_client
 
@@ -1494,6 +1495,32 @@ async def chat_endpoint(
 
         latest_state = sessions[sid]
 
+        is_flagged = latest_state.get("aml_status") == "flagged" or latest_state.get("fraud_status") == "flagged"
+        if is_flagged and not latest_state.get("assigned_employee_name"):
+            from models.employee import Employee, CaseAssignment
+            from sqlalchemy import func
+            from datetime import datetime
+            emp = db.query(Employee).order_by(func.random()).first()
+            if not emp:
+                emp = Employee(email="compliance@accuentry.com", name="System Manager", task="Review", section="Compliance", bank_branch="Main Branch")
+                db.add(emp)
+                db.commit()
+                db.refresh(emp)
+            
+            existing = db.query(CaseAssignment).filter(CaseAssignment.session_id == sid).first()
+            if not existing:
+                assignment = CaseAssignment(session_id=sid, employee_id=emp.id)
+                db.add(assignment)
+                db.commit()
+            
+            latest_state["assigned_employee_name"] = emp.name
+            latest_state["assigned_bank_branch"] = emp.bank_branch
+            latest_state["assigned_date"] = datetime.now().strftime("%Y-%m-%d")
+            latest_state["assigned_time"] = datetime.now().strftime("%I:%M %p")
+            sessions[sid] = latest_state
+            await _save_session_cache(sid, sessions[sid])
+            _save_state_to_db(sessions[sid], db)
+
         terminal_outcomes = {"manual_review", "pending_docs", "escalated", "rejected"}
         if latest_state.get("stage") in terminal_outcomes:
             _emit_decision_feedback(
@@ -1531,6 +1558,36 @@ async def chat_endpoint(
     except Exception as e:
         print(f"Error handling chat: {e}")
         raise e
+from pydantic import BaseModel
+class EmployeeLoginRequest(BaseModel):
+    email: str
+    name: str
+    task: str | None = None
+    section: str | None = None
+    bank_branch: str | None = None
+
+@app.post("/hitl/employee/login")
+async def employee_login(req: EmployeeLoginRequest, db: Session = Depends(get_db)):
+    from models.employee import Employee
+    emp = db.query(Employee).filter(Employee.email == req.email).first()
+    if not emp:
+        emp = Employee(
+            email=req.email,
+            name=req.name,
+            task=req.task or "Compliance Review",
+            section=req.section or "Account Opening",
+            bank_branch=req.bank_branch or "Main Branch",
+        )
+        db.add(emp)
+    else:
+        if req.name: emp.name = req.name
+        if req.task: emp.task = req.task
+        if req.section: emp.section = req.section
+        if req.bank_branch: emp.bank_branch = req.bank_branch
+    db.commit()
+    db.refresh(emp)
+    return {"id": emp.id, "name": emp.name, "email": emp.email, "bank_branch": emp.bank_branch}
+
 
 
 @app.get("/hitl/cases")
