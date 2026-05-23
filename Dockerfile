@@ -6,23 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN python - <<'PY'
-from pathlib import Path
-
-source = Path('requirements.txt')
-data = source.read_bytes()
-
-for encoding in ('utf-8-sig', 'utf-16', 'utf-16le', 'utf-16be'):
-    try:
-        text = data.decode(encoding)
-        break
-    except UnicodeDecodeError:
-        continue
-else:
-    raise SystemExit('Could not decode requirements.txt')
-
-Path('/tmp/requirements.txt').write_text(text, encoding='utf-8')
-PY
+RUN python -c "from pathlib import Path; data=Path('requirements.txt').read_bytes(); text=(data.decode('utf-16') if data[:2] in (b'\\xff\\xfe', b'\\xfe\\xff') else data.decode('utf-8-sig')); Path('/tmp/requirements.txt').write_text(text, encoding='utf-8')"
 RUN pip install --no-cache-dir --prefix=/install -r /tmp/requirements.txt
 
 FROM python:3.11-slim
