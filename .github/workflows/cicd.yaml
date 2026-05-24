@@ -49,8 +49,11 @@ jobs:
 
       - name: Build and push backend image
         uses: docker/build-push-action@v6
+        # run inside the backend folder so relative paths resolve correctly
+        working-directory: AccuEntry_Backend
         with:
-          context: ./AccuEntry_Backend
+          context: .
+          file: ./Dockerfile
           push: true
           tags: |
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
