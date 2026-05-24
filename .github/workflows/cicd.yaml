@@ -1,0 +1,89 @@
+name: AccuEntry Backend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "AccuEntry_Backend/**"
+      - ".github/workflows/cicd.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: accuentry-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GCP_REGION: asia-south1
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GAR_REPOSITORY: accuentry
+  CLOUD_RUN_SERVICE: accuentry-api
+  IMAGE_NAME: api
+  ACCUVERIFY_URL: https://accuverify-424990990402.asia-south1.run.app
+  FRONTEND_URL: https://virtusa-accu-entry-frontend.vercel.app
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./AccuEntry_Backend
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Deploy backend to Cloud Run
+        run: |
+          gcloud run deploy "${CLOUD_RUN_SERVICE}" \
+            --image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --platform=managed \
+            --ingress=all \
+            --allow-unauthenticated \
+            --memory=2Gi \
+            --cpu=1 \
+            --timeout=120 \
+            --concurrency=40 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --port=8080 \
+            --update-env-vars="ACCUVERIFY_URL=${ACCUVERIFY_URL},ACCUVERIFY_USE_IAM=true,LLM_PROVIDER=gemini,FRONTEND_URL=${FRONTEND_URL},CORS_ORIGINS=${FRONTEND_URL},CORS_ORIGIN_REGEX=false,USE_REDIS_SESSIONS=true,USE_REDIS_OTP=true,RAG_USE_CHROMA=false,DECISION_USE_RAG=false,FRAUD_SKIP_LLM_BELOW=25,REQUIRE_HITL_API_KEY=true,REQUIRE_VERIFY_SERVICE_KEY=true"
+
+      - name: Grant backend service account access to AccuVerify
+        run: |
+          API_SA="$(gcloud run services describe "${CLOUD_RUN_SERVICE}" --region="${GCP_REGION}" --project="${GCP_PROJECT_ID}" --format='value(spec.template.spec.serviceAccountName)')"
+          if [ -z "${API_SA}" ] || [ "${API_SA}" = "default" ]; then
+            PROJECT_NUMBER="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')"
+            API_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+          fi
+
+          gcloud run services add-iam-policy-binding "accuverify" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --member="serviceAccount:${API_SA}" \
+            --role="roles/run.invoker"
