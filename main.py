@@ -1551,8 +1551,66 @@ async def chat_endpoint(
             otp_required=stage == "otp_verification",
         )
     except Exception as e:
-        print(f"Error handling chat: {e}")
-        raise e
+        logger.exception("Error handling chat sid=%s", locals().get("sid"))
+
+        fallback_state = locals().get("state")
+        if isinstance(fallback_state, dict):
+            stage = fallback_state.get("stage") or "data_capture"
+            step, main_step = _ui_step_and_label(stage)
+            fallback_reply = (
+                _last_assistant_text(fallback_state.get("messages", []))
+                or _fallback_assistant_message(stage, fallback_state.get("requires_upload", False))
+            )
+            fallback_state = {
+                **fallback_state,
+                "messages": list(fallback_state.get("messages", []))
+                + [{"role": "assistant", "text": fallback_reply}],
+            }
+            sessions[sid] = _trim_messages(fallback_state)
+            try:
+                await _save_session_cache(sid, sessions[sid])
+                _save_state_to_db(sessions[sid], db)
+                _persist_session_tracking(sessions[sid], db)
+            except Exception:
+                logger.exception("Failed to persist chat fallback sid=%s", sid)
+
+            return ChatResponse(
+                message=fallback_reply,
+                progress=_effective_progress(sessions[sid]),
+                requires_upload=sessions[sid].get("requires_upload", False),
+                stage=stage,
+                completed=stage == "complete",
+                session_ended=False,
+                session_end_reason=None,
+                step=step,
+                current_main_step=main_step,
+                aml_status=sessions[sid].get("aml_status", "pending"),
+                aml_in_background=sessions[sid].get("aml_in_background", False),
+                fraud_status=sessions[sid].get("fraud_status"),
+                fraud_risk_score=sessions[sid].get("fraud_risk_score"),
+                fraud_signals=sessions[sid].get("fraud_signals", []),
+                fraud_reasoning=sessions[sid].get("fraud_reasoning"),
+                otp_required=stage == "otp_verification",
+            )
+
+        return ChatResponse(
+            message="I’m having trouble processing that right now. Please try again shortly.",
+            progress=0,
+            requires_upload=False,
+            stage="data_capture",
+            completed=False,
+            session_ended=False,
+            session_end_reason=None,
+            step=1,
+            current_main_step="Detail Capture",
+            aml_status="pending",
+            aml_in_background=False,
+            fraud_status=None,
+            fraud_risk_score=None,
+            fraud_signals=[],
+            fraud_reasoning=None,
+            otp_required=False,
+        )
 
 
 @app.get("/hitl/cases")
