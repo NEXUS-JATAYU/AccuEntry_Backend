@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ \
 COPY requirements.txt .
 RUN pip install --no-cache-dir upstash-redis
 RUN python -c "from pathlib import Path; data=Path('requirements.txt').read_bytes(); text=(data.decode('utf-16') if data[:2] in (b'\\xff\\xfe', b'\\xfe\\xff') else data.decode('utf-8-sig')); Path('/tmp/requirements.txt').write_text(text, encoding='utf-8')"
-RUN pip install --no-cache-dir --prefix=/install -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --ignore-installed --prefix=/install -r /tmp/requirements.txt
 
 FROM python:3.11-slim
 
