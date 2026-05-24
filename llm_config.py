@@ -13,7 +13,11 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("AGENT_LLM_MODEL", "llama3.2")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GOOGLE_API_KEY = (
+    os.getenv("BACKEND_GOOGLE_API_KEY")
+    or os.getenv("GOOGLE_API_KEY")
+    or ""
+).strip()
 
 _AGENT_OVERRIDES: dict[str, dict] = {
     "decision_agent": {"temperature": 0.1, "model": "llama3.2"},
