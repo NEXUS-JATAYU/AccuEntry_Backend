@@ -73,7 +73,7 @@ jobs:
             --concurrency=40 \
             --min-instances=0 \
             --max-instances=3 \
-            --port=8080 \
+            --port=8082 \
             --update-env-vars="ACCUVERIFY_URL=${ACCUVERIFY_URL},ACCUVERIFY_USE_IAM=true,LLM_PROVIDER=gemini,FRONTEND_URL=${FRONTEND_URL},CORS_ORIGINS=${FRONTEND_URL},CORS_ORIGIN_REGEX=false,USE_REDIS_SESSIONS=true,USE_REDIS_OTP=true,RAG_USE_CHROMA=false,DECISION_USE_RAG=false,FRAUD_SKIP_LLM_BELOW=25,REQUIRE_HITL_API_KEY=true,REQUIRE_VERIFY_SERVICE_KEY=true"
 
       - name: Grant backend service account access to AccuVerify

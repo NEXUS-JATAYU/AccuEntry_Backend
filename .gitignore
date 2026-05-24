@@ -37,3 +37,5 @@ logs/audit
 alembic/versions/*.pyc
 
 /uploads
+
+DOCKER.md
