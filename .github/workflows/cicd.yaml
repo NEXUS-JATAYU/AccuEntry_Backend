@@ -49,10 +49,10 @@ jobs:
 
       - name: Build and push backend image
         uses: docker/build-push-action@v6
-        # use repo root as context and reference Dockerfile explicitly
+        # use repo root as context and reference Dockerfile in repo root
         with:
           context: .
-          file: ./AccuEntry_Backend/Dockerfile
+          file: ./Dockerfile
           push: true
           tags: |
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
