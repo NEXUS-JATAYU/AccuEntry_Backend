@@ -16,7 +16,7 @@ from core.http_client_pool import get_http_client
 from memory_manager import AgentMemoryManager
 from state import OnboardingState
 
-ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://localhost:9000")
+ACCUVERIFY_URL = os.getenv("ACCUVERIFY_URL", "http://127.0.0.1:9000").rstrip("/")
 _memory = AgentMemoryManager()
 logger = logging.getLogger(__name__)
 
