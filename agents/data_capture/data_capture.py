@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -118,6 +119,54 @@ def _last_user_text(state: OnboardingState) -> str:
     return ""
 
 
+def _rule_extract_candidate(target: str, user_text: str) -> str | None:
+    text = (user_text or "").strip()
+    lowered = text.lower()
+    if not text:
+        return None
+
+    if target in CHOICES:
+        for choice in CHOICES[target]:
+            if choice.lower() in lowered:
+                return choice
+        if target == "account_type":
+            if any(token in lowered for token in ("saving", "savings")):
+                return "Savings"
+            if "current" in lowered:
+                return "Current"
+            if "fixed deposit" in lowered or "fd" in lowered:
+                return "Fixed Deposit"
+            if "recurring deposit" in lowered or "rd" in lowered:
+                return "Recurring Deposit"
+        return None
+
+    if target in _SKIP_LLM_FOR_TARGETS:
+        if lowered in {"yes", "y", "no", "n", "true", "false"}:
+            return text
+        return None
+
+    if target == "pan_number":
+        candidate = re.sub(r"\s+", "", text).upper()
+        if re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", candidate):
+            return candidate
+
+    if target == "mobile_number":
+        digits = re.sub(r"\D", "", text)
+        if len(digits) == 12 and digits.startswith("91"):
+            digits = digits[2:]
+        if len(digits) == 10:
+            return digits
+
+    if target == "email_id" and "@" in text:
+        return text.lower().strip()
+
+    if target == "dob" or target == "nominee_dob":
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text.strip()):
+            return text.strip()
+
+    return None
+
+
 _llm_singleton = None
 
 
@@ -130,6 +179,7 @@ def _get_llm():
 
 def entry_node(state: OnboardingState) -> dict[str, Any]:
     target = _first_missing(state)
+    out: dict[str, Any] = {"capture_target": target, "capture_error": None}
     if target and not state.get("messages"):
     # First message of the session — prime the agent with policy context
         account_type = state.get("account_type") or "savings account"
@@ -138,7 +188,6 @@ def entry_node(state: OnboardingState) -> dict[str, Any]:
     # Store on state so capture_node / validate_node can reference it
     # (just a metadata key, never shown directly to user)
         out["rag_policy_context"] = rag_context
-    out: dict[str, Any] = {"capture_target": target, "capture_error": None}
 
     if target is None:
         return out
@@ -176,6 +225,10 @@ async def capture_node(state: OnboardingState) -> dict[str, Any]:
     user_text = _last_user_text(state)
     if not user_text:
         return {"capture_candidate": None}
+
+    ruled_candidate = _rule_extract_candidate(target, user_text)
+    if ruled_candidate is not None:
+        return {"capture_candidate": ruled_candidate}
 
     if target in _SKIP_LLM_FOR_TARGETS:
         return {"capture_candidate": user_text}

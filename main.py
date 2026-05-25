@@ -10,7 +10,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-# Load .env before any app submodule reads ACCUVERIFY_URL / DB_* / MONGO_*.
+
 load_dotenv()
 
 from fastapi import FastAPI, Form, UploadFile, File, Depends, HTTPException
