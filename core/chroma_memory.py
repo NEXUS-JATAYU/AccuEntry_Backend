@@ -1,11 +1,3 @@
-"""
-Chroma memory backend for agent interactions.
-
-This module is optional by design:
-- If chromadb or embedding dependencies are unavailable, methods no-op.
-- The rest of the app continues to run with in-memory fallback.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -38,6 +30,11 @@ class ChromaMemoryBackend:
         self.enabled = os.getenv("AGENT_MEMORY_PROVIDER", "chroma").lower() == "chroma"
         self.write_enabled = os.getenv("AGENT_MEMORY_WRITE_ENABLED", "true").lower() in {"1", "true", "yes"}
         self.retrieval_enabled = os.getenv("AGENT_MEMORY_RETRIEVAL_ENABLED", "true").lower() in {"1", "true", "yes"}
+        
+        # Optimization: If both read and write capabilities are turned off, disable Chroma entirely
+        if not self.write_enabled and not self.retrieval_enabled:
+            self.enabled = False
+
         self.reward_rerank_enabled = os.getenv("AGENT_MEMORY_REWARD_RERANK_ENABLED", "true").lower() in {"1", "true", "yes"}
         self.reward_alpha = float(os.getenv("AGENT_MEMORY_REWARD_ALPHA", "0.8"))
         self.reward_beta = float(os.getenv("AGENT_MEMORY_REWARD_BETA", "0.2"))
@@ -52,7 +49,6 @@ class ChromaMemoryBackend:
     def _init_client(self) -> None:
         try:
             import chromadb
-            from chromadb.utils import embedding_functions
         except Exception as exc:
             self.enabled = False
             logger.warning("Chroma backend disabled: dependency unavailable (%s)", exc)
@@ -72,11 +68,17 @@ class ChromaMemoryBackend:
             logger.warning("Chroma backend disabled: client init failed (%s)", exc)
             return
 
+    def _get_embedding_fn(self) -> Any:
+        if self._embedding_fn is not None:
+            return self._embedding_fn
+
+        # Lazy loading of sentence-transformers embedding model to minimize latency and memory
         model_name = os.getenv(
             "CHROMA_EMBED_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
         )
         try:
+            from chromadb.utils import embedding_functions
             self._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
                 model_name=model_name
             )
@@ -84,6 +86,7 @@ class ChromaMemoryBackend:
             # Keep backend active: Chroma can still use default embedding function.
             self._embedding_fn = None
             logger.warning("SentenceTransformer embedding init failed (%s); using default", exc)
+        return self._embedding_fn
 
     def _collection_name(self, agent_name: str) -> str:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in agent_name)
@@ -92,16 +95,21 @@ class ChromaMemoryBackend:
     def _get_collection(self, agent_name: str):
         if not self.enabled or self._client is None:
             return None
-        name = self._collection_name(agent_name)
-        existing = self._collections.get(name)
-        if existing is not None:
-            return existing
-        kwargs: dict[str, Any] = {"name": name}
-        if self._embedding_fn is not None:
-            kwargs["embedding_function"] = self._embedding_fn
-        collection = self._client.get_or_create_collection(**kwargs)
-        self._collections[name] = collection
-        return collection
+        try:
+            name = self._collection_name(agent_name)
+            existing = self._collections.get(name)
+            if existing is not None:
+                return existing
+            kwargs: dict[str, Any] = {"name": name}
+            emb_fn = self._get_embedding_fn()
+            if emb_fn is not None:
+                kwargs["embedding_function"] = emb_fn
+            collection = self._client.get_or_create_collection(**kwargs)
+            self._collections[name] = collection
+            return collection
+        except Exception as exc:
+            logger.warning("Chroma get_or_create_collection failed for %s: %s", agent_name, exc)
+            return None
 
     def _hash_value(self, value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
