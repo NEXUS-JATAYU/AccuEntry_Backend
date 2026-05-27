@@ -13,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from rag_service import retrieve_as_context
 from core.http_client_pool import get_http_client
+from core.verify_client import get_verify_request_headers
 from memory_manager import AgentMemoryManager
 from state import OnboardingState
 
@@ -86,7 +87,11 @@ async def poll_status_node(state: OnboardingState) -> dict[str, Any]:
     url = f"{ACCUVERIFY_URL.rstrip('/')}/kyc/status"
     try:
         client = get_http_client()
-        resp = await client.get(url, params={"user_id": state["session_id"]})
+        resp = await client.get(
+            url,
+            params={"user_id": state["session_id"]},
+            headers=get_verify_request_headers(),
+        )
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPError as exc:

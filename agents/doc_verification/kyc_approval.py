@@ -13,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from core.http_client_pool import get_http_client
+from core.verify_client import get_verify_request_headers
 from state import OnboardingState
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ async def check_node(state: OnboardingState) -> dict[str, Any]:
                 "user_id": state["session_id"],
                 "agent_id": "accuentry-bot",
             },
+            headers=get_verify_request_headers(),
         )
         resp.raise_for_status()
         body = resp.json()
