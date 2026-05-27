@@ -22,7 +22,6 @@ env:
   ACCUVERIFY_URL: https://accuverify-424990990402.asia-south1.run.app
   FRONTEND_URL: https://virtusa-accu-entry-frontend.vercel.app
   BACKEND_GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-  VERIFY_SERVICE_API_KEY: ${{ secrets.VERIFY_SERVICE_API_KEY }}
 
 jobs:
   build-and-deploy:
@@ -81,7 +80,7 @@ jobs:
             --min-instances=0 \
             --max-instances=3 \
             --port=8082 \
-            --update-env-vars="ACCUVERIFY_URL=${ACCUVERIFY_URL},ACCUVERIFY_USE_IAM=true,VERIFY_SERVICE_API_KEY=${VERIFY_SERVICE_API_KEY},LLM_PROVIDER=gemini,BACKEND_GOOGLE_API_KEY=${BACKEND_GOOGLE_API_KEY},FRONTEND_URL=${FRONTEND_URL},CORS_ORIGINS=${FRONTEND_URL},CORS_ORIGIN_REGEX=https://([a-z0-9-]+\.)*vercel\.app$,USE_REDIS_SESSIONS=true,USE_REDIS_OTP=true,RAG_USE_CHROMA=false,DECISION_USE_RAG=false,FRAUD_SKIP_LLM_BELOW=50,REQUIRE_HITL_API_KEY=true"
+            --update-env-vars="ACCUVERIFY_URL=${ACCUVERIFY_URL},ACCUVERIFY_USE_IAM=true,LLM_PROVIDER=gemini,BACKEND_GOOGLE_API_KEY=${BACKEND_GOOGLE_API_KEY},FRONTEND_URL=${FRONTEND_URL},CORS_ORIGINS=${FRONTEND_URL},CORS_ORIGIN_REGEX=https://([a-z0-9-]+\.)*vercel\.app$,USE_REDIS_SESSIONS=true,USE_REDIS_OTP=true,RAG_USE_CHROMA=false,DECISION_USE_RAG=false,FRAUD_SKIP_LLM_BELOW=50,REQUIRE_HITL_API_KEY=true"
 
       - name: Grant backend service account access to AccuVerify
         run: |
