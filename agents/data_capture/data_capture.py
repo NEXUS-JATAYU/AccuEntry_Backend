@@ -115,6 +115,12 @@ def _last_user_text(state: OnboardingState) -> str:
     return ""
 
 
+def _text_has_choice(user_text: str, choice: str) -> bool:
+    lowered = f" {(user_text or '').strip().lower()} "
+    needle = re.escape(choice.strip().lower())
+    return bool(re.search(rf"(?<!\w){needle}(?!\w)", lowered))
+
+
 def _rule_extract_candidate(target: str, user_text: str) -> str | None:
     text = (user_text or "").strip()
     lowered = text.lower()
@@ -123,7 +129,7 @@ def _rule_extract_candidate(target: str, user_text: str) -> str | None:
 
     if target in CHOICES:
         for choice in CHOICES[target]:
-            if choice.lower() in lowered:
+            if _text_has_choice(lowered, choice):
                 return choice
         if target == "account_type":
             if any(token in lowered for token in ("saving", "savings")):
