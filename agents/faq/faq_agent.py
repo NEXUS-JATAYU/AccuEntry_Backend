@@ -4,7 +4,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from llm_config import AgentLLM
 from rag_service import build_faq_retrieval_query, retrieve_as_context
 from state import OnboardingState
-from prompts import SYSTEM_PROMPT
+from prompts import SYSTEM_PROMPT, POST_DECISION_SYSTEM_PROMPT
 import os
 import re
 
@@ -72,7 +72,25 @@ async def faq_node(state: OnboardingState) -> dict:
             }]
         }
 
-    formatted_prompt = SYSTEM_PROMPT.format(context=policy_chunks, question=user_text)
+    stage = state.get("stage", "complete")
+    if stage == "complete":
+        status_info = "COMPLETED / ACTIVATED (Your account is active and ready for use. Celebrate this with the user and provide details on next steps, app download, card delivery, net banking, etc.)"
+    elif stage == "rejected":
+        status_info = "REJECTED (Your application was declined following compliance/KYC/AML checks. Offer advice empathetically, explain potential reasons like name mismatch or blurry uploads, and guide them on how to reapply or appeal.)"
+    elif stage == "manual_review":
+        status_info = "PENDING / MANUAL REVIEW (Your application is under manual review by a compliance officer. Usually takes 24-48 hours. Advise them to wait patiently.)"
+    elif stage == "pending_docs":
+        status_info = "PENDING DOCUMENTS (Your application is pending clean document uploads. Advise them on document requirements and clarity.)"
+    elif stage == "escalated":
+        status_info = "ESCALATED (Your application is escalated for advanced compliance review. Advise them on typical wait times.)"
+    else:
+        status_info = f"IN PROGRESS (Current stage: {stage})"
+
+    formatted_prompt = POST_DECISION_SYSTEM_PROMPT.format(
+        status_info=status_info,
+        context=policy_chunks,
+        question=user_text
+    )
     
     try:
         llm = AgentLLM().get_llm("faq")
