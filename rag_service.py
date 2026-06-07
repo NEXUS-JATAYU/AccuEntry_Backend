@@ -18,26 +18,62 @@ RAG_USE_CHROMA = os.getenv("RAG_USE_CHROMA", "false").lower() in {"1", "true", "
 
 TOP_K = 5 #you can define it in env variable as well
 
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
+    "how", "i", "in", "is", "it", "my", "of", "on", "or", "our", "that", "the",
+    "their", "there", "this", "to", "was", "what", "when", "where", "which", "who",
+    "why", "will", "with", "you", "your", "can", "do", "does", "did", "if", "am",
+}
+
+
+def _tokenize(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(token) > 2 and token not in _STOPWORDS
+    }
+
+
+def _opening_phrase(text: str) -> str:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return " ".join(words[:2])
+
 def _load_chunks(path : str = KNOWLEDGE_BASE_DIR) -> list[str]:
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     # Split by double newlines and strip whitespace
     chunks = [chunk.strip() for chunk in content.split('\n\n') if chunk.strip()]
+    chunks = [
+        chunk
+        for chunk in chunks
+        if re.search(r"^Q\d+:\s*", chunk, flags=re.IGNORECASE | re.MULTILINE)
+        and re.search(r"^A:\s*", chunk, flags=re.IGNORECASE | re.MULTILINE)
+    ]
     return chunks
 
 
 def _lexical_retrieve(query: str, top_k: int = TOP_K) -> list[str]:
     chunks = _load_chunks()
-    query_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+    query_tokens = _tokenize(query)
     if not query_tokens:
         return chunks[:top_k]
 
+    def _chunk_score(chunk: str) -> tuple[int, int]:
+        question_text = " ".join(
+            re.sub(r"^Q\d+:\s*", "", line.strip(), flags=re.IGNORECASE)
+            for line in chunk.splitlines()
+            if line.strip().upper().startswith("Q")
+        )
+        question_tokens = _tokenize(question_text or chunk)
+        chunk_tokens = _tokenize(chunk)
+        question_overlap = len(query_tokens & question_tokens)
+        chunk_overlap = len(query_tokens & chunk_tokens)
+        opening_bonus = 2 if _opening_phrase(query) and _opening_phrase(query) == _opening_phrase(question_text or chunk) else 0
+        return (question_overlap * 4 + chunk_overlap + opening_bonus, -len(chunk_tokens))
+
     scored = sorted(
         chunks,
-        key=lambda chunk: (
-            len(query_tokens & set(re.findall(r"[a-z0-9]+", chunk.lower()))),
-            len(chunk),
-        ),
+        key=_chunk_score,
         reverse=True,
     )
     return scored[:top_k]
@@ -113,7 +149,7 @@ def build_faq_retrieval_query(
     retrieval pulls onboarding-process chunks from knowledge_base.txt.
     """
     text = (user_text or "").strip()
-    hints: list[str] = ["AccuEntry bank account onboarding"]
+    hints: list[str] = []
     aml_lower = (aml_status or "").lower()
     if aml_lower == "flagged":
         hints.append("AML flagged compliance rejection branch visit appeal")
